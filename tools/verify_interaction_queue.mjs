@@ -35,7 +35,7 @@ assert.equal(
 );
 assert.match(
   extractFunction('scheduler'),
-  /scheduleQueuedInputs\(horizon\)/,
+  /scheduleQueuedInputs\(ctx\.currentTime \+ INPUT_QUEUE_LOOKAHEAD\)/,
   'the audio lookahead scheduler must drain the input queue',
 );
 assert.match(
@@ -58,6 +58,18 @@ assert.match(
   /entry\.kind === 'sustain-retune'[\s\S]*retuneSustainVoice\(/,
   'a queued sustain event must retune the existing voice',
 );
+for (const name of ['enqueueActivation', 'enqueueSustainRetune']) {
+  assert.match(
+    extractFunction(name),
+    /removeQueuedSample\(z\.sample\)/,
+    `${name} must replace an older queued item of the same sample`,
+  );
+  assert.match(
+    extractFunction(name),
+    /reflowQueuedInputTimes\(\)/,
+    `${name} must compact the remaining queue after replacement`,
+  );
+}
 
 const sandbox = {};
 vm.runInNewContext(
@@ -80,10 +92,11 @@ vm.runInNewContext(
   ${extractFunction('tryActivate')}
 
   const S8 = 0.25;
-  let nextInputTime = 0;
+  const inputQueue = [];
+  let lastCommittedInputTime = -Infinity;
   let quantizedTime = 1;
   function quantize() { return quantizedTime; }
-  ${extractFunction('allocateInputTime')}
+  ${extractFunction('reflowQueuedInputTimes')}
 
   const RELEASE_SCHEDULE_LEAD = 0.006;
   let ctx = { currentTime: 2 };
@@ -106,11 +119,14 @@ vm.runInNewContext(
       state = tryActivate(7, x1, y1, state);
       return { zones: [...enqueuedZones], state };
     },
-    resetQueue(nextBeat, tail) {
+    reflowQueue(length, nextBeat, committed = -Infinity) {
+      inputQueue.length = 0;
+      for (let i = 0; i < length; i++) inputQueue.push({ when: 0 });
       quantizedTime = nextBeat;
-      nextInputTime = tail;
+      lastCommittedInputTime = committed;
+      reflowQueuedInputTimes();
+      return inputQueue.map(entry => entry.when);
     },
-    allocateInputTime,
     setNow(now) { ctx.currentTime = now; },
     texturePositionAt,
     textureRateAt,
@@ -128,20 +144,40 @@ const sustainQueueSandbox = {};
 vm.runInNewContext(
   `
   const S8 = 0.25;
-  let nextInputTime = 0;
+  let lastCommittedInputTime = -Infinity;
   let inputSerial = 0;
   const inputQueue = [];
+  const pointers = new Map();
   const zones = [
+    { sample: 'da', pitchTier: 0 },
+    { sample: 'gou', pitchTier: 0 },
     { sample: 'jiao', pitchTier: 0 },
     { sample: 'jiao', pitchTier: 1 },
+    { sample: 'da', pitchTier: 1 },
   ];
   function quantize() { return 1; }
   function hideControlsUntilIdle() {}
   function flashZone() {}
-  ${extractFunction('allocateInputTime')}
+  ${extractFunction('reflowQueuedInputTimes')}
+  ${extractFunction('removeQueuedSample')}
+  ${extractFunction('enqueueActivation')}
   ${extractFunction('enqueueSustainRetune')}
   ${extractFunction('isRetunableSustainVoice')}
   ${extractFunction('retuneHeldJiao')}
+
+  enqueueActivation(0, 7);
+  enqueueActivation(1, 7);
+  enqueueActivation(4, 7);
+  const pressEntries = inputQueue.map(entry => ({
+    id: entry.id,
+    sample: entry.sample,
+    pitchTier: entry.pitchTier,
+    when: entry.when,
+  }));
+
+  inputQueue.length = 0;
+  inputSerial = 0;
+  lastCommittedInputTime = -Infinity;
   const voice = {
     name: 'jiao',
     mode: 'sustain',
@@ -151,12 +187,16 @@ vm.runInNewContext(
     cleaned: false,
     rate: 1,
   };
-  const state = { zone: 0, voice, pendingEntryId: null };
-  const accepted = retuneHeldJiao(7, state, 1);
+  const state = { zone: 2, voice, pendingEntryId: null };
+  const acceptedFirst = retuneHeldJiao(7, state, 3);
+  const acceptedSecond = retuneHeldJiao(7, state, 2);
   globalThis.sustainQueueResult = {
-    accepted,
+    pressEntries,
+    acceptedFirst,
+    acceptedSecond,
     zone: state.zone,
     voiceRate: voice.rate,
+    queueLength: inputQueue.length,
     entry: { ...inputQueue[0], voice: inputQueue[0].voice === voice },
   };
   `,
@@ -166,21 +206,27 @@ vm.runInNewContext(
 assert.deepEqual(
   JSON.parse(JSON.stringify(sustainQueueSandbox.sustainQueueResult)),
   {
-    accepted: true,
-    zone: 1,
+    pressEntries: [
+      { id: 2, sample: 'gou', pitchTier: 0, when: 1 },
+      { id: 3, sample: 'da', pitchTier: 1, when: 1.25 },
+    ],
+    acceptedFirst: true,
+    acceptedSecond: true,
+    zone: 2,
     voiceRate: 1,
+    queueLength: 1,
     entry: {
-      id: 1,
+      id: 2,
       kind: 'sustain-retune',
       pointerId: 7,
-      zone: 1,
+      zone: 2,
       sample: 'jiao',
-      pitchTier: 1,
+      pitchTier: 0,
       voice: true,
       when: 1,
     },
   },
-  'a held jiao crossing must enqueue a retune without changing pitch early',
+  'each sample must keep only its newest queued press or sustain retune',
 );
 
 api.setGrid(4, 3, 400, 300);
@@ -212,17 +258,15 @@ assert.deepEqual(
   'portrait movement must include every crossed pitch row',
 );
 
-api.resetQueue(1, 0);
 assert.deepEqual(
-  [api.allocateInputTime(), api.allocateInputTime(), api.allocateInputTime()],
+  plain(api.reflowQueue(3, 1)),
   [1, 1.25, 1.5],
   'queued hits must occupy consecutive eighth-note slots',
 );
-api.resetQueue(2, 0.5);
-assert.equal(
-  api.allocateInputTime(),
-  2,
-  'after an idle gap the queue must resume on the next quantized beat',
+assert.deepEqual(
+  plain(api.reflowQueue(2, 2, 2.25)),
+  [2.5, 2.75],
+  'queued hits must start after the most recently committed slot',
 );
 
 const rateEvents = [];
@@ -288,4 +332,5 @@ assert.equal(api.textureRateAt(voice, 2.1), 0.5);
 console.log('Interaction queue verification passed:');
 console.log('- landscape and portrait fast swipes include every crossed zone');
 console.log('- queued hits occupy consecutive eighth-note slots');
+console.log('- da, gou, and jiao each keep only their newest queued item');
 console.log('- held jiao retunes are queued in place and keep release-frame tracking');

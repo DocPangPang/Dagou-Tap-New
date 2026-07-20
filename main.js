@@ -79,10 +79,11 @@ let jellyScale = 1;       // 果冻层当前缩放（欠阻尼弹簧，带 Q 弹
 let jellyVel = 0;         // 弹簧速度
 let lastTick = 0;         // 上一帧时间（求 dt 用）
 const INPUT_LOOKAHEAD = 0.12;
+const INPUT_QUEUE_LOOKAHEAD = 0.03;
 const inputQueue = [];     // 滑动经过的分区按进入顺序排到连续八分音符
 const inputVisualTimers = new Set();
 let inputSerial = 0;
-let nextInputTime = 0;
+let lastCommittedInputTime = -Infinity;
 const pointers = new Map();// pointerId -> { zone, voice, pendingEntryId, lastX, lastY }
 const CONTROLS_IDLE_MS = 2000;
 const CONTROLS_HOVER_IDLE_MS = 250;
@@ -643,7 +644,7 @@ function scheduler() {
     nextNoteTime += S16;
     stepCount = (stepCount + 1) % 64;
   }
-  scheduleQueuedInputs(horizon);
+  scheduleQueuedInputs(ctx.currentTime + INPUT_QUEUE_LOOKAHEAD);
 }
 
 /* ============================================================
@@ -1695,16 +1696,34 @@ function flashZone(zi) {
   flashLayer.appendChild(el);
 }
 
-function allocateInputTime() {
-  const nextBeat = quantize(S8);
-  const when = Math.max(nextBeat, nextInputTime);
-  nextInputTime = when + S8;
-  return when;
+function reflowQueuedInputTimes() {
+  let when = quantize(S8);
+  if (Number.isFinite(lastCommittedInputTime)) {
+    when = Math.max(when, lastCommittedInputTime + S8);
+  }
+  for (const entry of inputQueue) {
+    entry.when = when;
+    when += S8;
+  }
+}
+
+function removeQueuedSample(sample) {
+  for (let i = inputQueue.length - 1; i >= 0; i--) {
+    const entry = inputQueue[i];
+    if (entry.sample !== sample) continue;
+
+    inputQueue.splice(i, 1);
+    const state = pointers.get(entry.pointerId);
+    if (state && state.pendingEntryId === entry.id) {
+      state.pendingEntryId = null;
+    }
+  }
 }
 
 function enqueueActivation(zi, pointerId) {
   hideControlsUntilIdle();
   const z = zones[zi];
+  removeQueuedSample(z.sample);
   const entry = {
     id: ++inputSerial,
     kind: 'press',
@@ -1712,9 +1731,10 @@ function enqueueActivation(zi, pointerId) {
     zone: zi,
     sample: z.sample,
     pitchTier: z.pitchTier,
-    when: allocateInputTime(),
+    when: 0,
   };
   inputQueue.push(entry);
+  reflowQueuedInputTimes();
   flashZone(zi);
   return entry;
 }
@@ -1722,6 +1742,7 @@ function enqueueActivation(zi, pointerId) {
 function enqueueSustainRetune(zi, pointerId, voice) {
   hideControlsUntilIdle();
   const z = zones[zi];
+  removeQueuedSample(z.sample);
   const entry = {
     id: ++inputSerial,
     kind: 'sustain-retune',
@@ -1730,9 +1751,10 @@ function enqueueSustainRetune(zi, pointerId, voice) {
     sample: z.sample,
     pitchTier: z.pitchTier,
     voice,
-    when: allocateInputTime(),
+    when: 0,
   };
   inputQueue.push(entry);
+  reflowQueuedInputTimes();
   flashZone(zi);
   return entry;
 }
@@ -1776,7 +1798,9 @@ function playQueuedInput(entry) {
 
 function scheduleQueuedInputs(horizon) {
   while (inputQueue.length && inputQueue[0].when < horizon) {
-    playQueuedInput(inputQueue.shift());
+    const entry = inputQueue.shift();
+    lastCommittedInputTime = entry.when;
+    playQueuedInput(entry);
   }
 }
 
@@ -1784,6 +1808,7 @@ function cancelQueuedInputs(pointerId) {
   for (let i = inputQueue.length - 1; i >= 0; i--) {
     if (inputQueue[i].pointerId === pointerId) inputQueue.splice(i, 1);
   }
+  reflowQueuedInputTimes();
 }
 
 function clearInputVisualTimers() {
@@ -1985,7 +2010,7 @@ async function start() {
 
   startTime = ctx.currentTime + 0.12;
   nextNoteTime = startTime;
-  nextInputTime = startTime;
+  lastCommittedInputTime = -Infinity;
   inputQueue.length = 0;
   stepCount = 0;
   setInterval(scheduler, 25);
