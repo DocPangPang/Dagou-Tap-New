@@ -191,21 +191,28 @@ profileButton.addEventListener('click', openCreatorSpace);
 
 /* ---------- 和弦走向：C - G - Am - F（简单洗脑） ---------- */
 const CHORDS = [
-  { bass: 65.41, notes: [261.63, 329.63, 392.00, 523.25], pitchClasses: [0, 4, 7] }, // C
-  { bass: 49.00, notes: [196.00, 246.94, 293.66, 392.00], pitchClasses: [7, 11, 2] }, // G
-  { bass: 55.00, notes: [220.00, 261.63, 329.63, 440.00], pitchClasses: [9, 0, 4] }, // Am
-  { bass: 43.65, notes: [174.61, 220.00, 261.63, 349.23], pitchClasses: [5, 9, 0] }, // F
+  { bass: 65.41, notes: [261.63, 329.63, 392.00, 523.25] }, // C
+  { bass: 49.00, notes: [196.00, 246.94, 293.66, 392.00] }, // G
+  { bass: 55.00, notes: [220.00, 261.63, 329.63, 440.00] }, // Am
+  { bass: 43.65, notes: [174.61, 220.00, 261.63, 349.23] }, // F
 ];
 const HAT_VEL = [0.34, 0.16, 0.42, 0.16];
 
 // tools/analyze_pitch.py 实测所得：高能量、高置信度有声帧 MIDI 的加权中位数。
-// 三段原音音高不一致，因此每次都从各自锚点反推目标和弦音的 playbackRate。
+// 三段原音音高不一致，因此每个按键都从各自锚点反推固定目标音的 playbackRate。
 const BARK_SOURCE_MIDI = Object.freeze({
   da: 71.1950846771,
   gou: 65.5950930881,
   jiao: 71.1226079346,
 });
-const ORIGINAL_PITCH_TIER = 2;
+
+// 固定 A 小调五声音阶（A–C–D–E–G）。第三列 / 第三行是最接近
+// 对应原声音高的音：da / jiao → C5，gou → G4。
+const BARK_TARGET_MIDI = Object.freeze({
+  da: Object.freeze([79, 76, 72, 69]),    // G5, E5, C5, A4
+  gou: Object.freeze([72, 69, 67, 64]),   // C5, A4, G4, E4
+  jiao: Object.freeze([79, 76, 72, 69]),  // G5, E5, C5, A4
+});
 
 /* ============================================================
  * 主色调色板（全页面只用这几支颜色）
@@ -644,36 +651,11 @@ function quantize(unit) {
   return t;
 }
 
-function chordIndexAt(when) {
-  // when 已量化到节奏网格；使用实际播放时刻，避免在小节边界选到旧和弦。
-  const absoluteStep = Math.round((when - startTime) / S16);
-  const loopStep = ((absoluteStep % 64) + 64) % 64;
-  return (loopStep / 16) | 0;
-}
-
-function barkPlaybackRate(sample, pitchTier, when) {
-  // 第三列 / 第三行始终播放未经变调的原始音频。
-  if (pitchTier === ORIGINAL_PITCH_TIER) return 1;
-
+function barkPlaybackRate(sample, pitchTier) {
   const sourceMidi = BARK_SOURCE_MIDI[sample];
-  const chord = CHORDS[chordIndexAt(when)];
-  const above = [];
-  let nearestBelow = null;
-
-  // 跨多个八度展开当前三和弦：第一档取第二个上方音，第二档取最近
-  // 上方音，第四档取最近下方音，保证 高 > 次高 > 原音 > 低。
-  for (let midi = 24; midi <= 108; midi++) {
-    if (!chord.pitchClasses.includes(midi % 12)) continue;
-    if (midi > sourceMidi + 1e-7) above.push(midi);
-    else if (midi < sourceMidi - 1e-7) nearestBelow = midi;
-  }
-
-  const targetMidi =
-    pitchTier === 0 ? above[1] :
-    pitchTier === 1 ? above[0] :
-    nearestBelow;
-  if (!Number.isFinite(targetMidi)) {
-    throw new Error(`No chord-tone target for ${sample}, tier ${pitchTier}`);
+  const targetMidi = BARK_TARGET_MIDI[sample]?.[pitchTier];
+  if (!Number.isFinite(sourceMidi) || !Number.isFinite(targetMidi)) {
+    throw new Error(`No fixed pitch target for ${sample}, tier ${pitchTier}`);
   }
   return Math.pow(2, (targetMidi - sourceMidi) / 12);
 }
@@ -1618,7 +1600,7 @@ function activate(zi) {
 
   if (when !== lastGlobalHit) {               // 同一节奏点全局只触发一个音源
     lastGlobalHit = when;
-    const rate = barkPlaybackRate(z.sample, z.pitchTier, when);
+    const rate = barkPlaybackRate(z.sample, z.pitchTier);
     voice = playPressVoice(z.sample, rate, when);
   }
 

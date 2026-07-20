@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Measure bark-sample pitch and verify Web Audio playbackRate mappings.
+"""Measure bark-sample pitch and verify fixed Web Audio playbackRate mappings.
 
 Development-only utility. All generated reports and WAV files stay under
 tools/tmp so the complete tools directory can be excluded from web packages.
 
 The detector uses a frame-wise YIN estimate and rejects low-energy or
-low-confidence frames. Candidate playbackRate values are then applied by
-resampling the source samples, after which the rendered result is measured
-again instead of relying only on the frequency-ratio formula.
+low-confidence frames. Every screen key is assigned a fixed A-minor-pentatonic
+target. Candidate playbackRate values are then applied by resampling the source
+samples, after which the rendered result is measured again instead of relying
+only on the frequency-ratio formula.
 """
 
 from __future__ import annotations
@@ -24,13 +25,13 @@ import numpy as np
 
 A4_HZ = 440.0
 SAMPLE_NAMES = ("da", "gou", "jiao")
-CHORDS = (
-    ("C", (0, 4, 7)),
-    ("G", (7, 11, 2)),
-    ("Am", (9, 0, 4)),
-    ("F", (5, 9, 0)),
-)
-TIER_NAMES = ("high_2", "high_1", "original", "low_1")
+MINOR_PENTATONIC_PITCH_CLASSES = (9, 0, 2, 4, 7)  # A, C, D, E, G
+FIXED_TARGET_MIDI = {
+    "da": (79, 76, 72, 69),    # G5, E5, C5, A4
+    "gou": (72, 69, 67, 64),   # C5, A4, G4, E4
+    "jiao": (79, 76, 72, 69),  # G5, E5, C5, A4
+}
+TIER_NAMES = ("pitch_1", "pitch_2", "nearest_minor", "pitch_4")
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 
@@ -230,25 +231,6 @@ def playback_rate_resample(samples: np.ndarray, rate: float) -> np.ndarray:
     return output
 
 
-def chord_tones_around(anchor_midi: float, pitch_classes: tuple[int, ...]) -> list[int]:
-    return [
-        midi
-        for midi in range(24, 109)
-        if midi % 12 in pitch_classes and abs(midi - anchor_midi) > 1e-7
-    ]
-
-
-def targets_for_anchor(
-    anchor_midi: float, pitch_classes: tuple[int, ...]
-) -> tuple[int, int, None, int]:
-    tones = chord_tones_around(anchor_midi, pitch_classes)
-    above = [midi for midi in tones if midi > anchor_midi]
-    below = [midi for midi in tones if midi < anchor_midi]
-    if len(above) < 2 or not below:
-        raise ValueError(f"Not enough chord tones around MIDI {anchor_midi:.3f}")
-    return above[1], above[0], None, below[-1]
-
-
 def serialise_analysis(analysis: PitchAnalysis) -> dict:
     data = asdict(analysis)
     data["frames"] = [asdict(frame) for frame in analysis.frames]
@@ -278,73 +260,61 @@ def run(args: argparse.Namespace) -> int:
 
     mappings = []
     worst_error_cents = 0.0
-    for chord_index, (chord_name, pitch_classes) in enumerate(CHORDS):
-        for sample_name in SAMPLE_NAMES:
-            sample_rate, samples, source_analysis = sources[sample_name]
-            targets = targets_for_anchor(source_analysis.anchor_midi, pitch_classes)
+    for sample_name in SAMPLE_NAMES:
+        sample_rate, samples, source_analysis = sources[sample_name]
+        targets = FIXED_TARGET_MIDI[sample_name]
 
-            for tier_index, tier_name in enumerate(TIER_NAMES):
-                target_midi = targets[tier_index]
-                if target_midi is None:
-                    rate = 1.0
-                    rendered = samples
-                else:
-                    rate = 2.0 ** (
-                        (target_midi - source_analysis.anchor_midi) / 12.0
-                    )
-                    rendered = playback_rate_resample(samples, rate)
+        for tier_index, tier_name in enumerate(TIER_NAMES):
+            target_midi = targets[tier_index]
+            if target_midi % 12 not in MINOR_PENTATONIC_PITCH_CLASSES:
+                raise ValueError(f"{sample_name}/{tier_name} is outside A minor pentatonic")
 
-                rendered_analysis = analyze_pitch(rendered, sample_rate)
-                target_note = None
-                target_hz = None
-                error_cents = None
-                if target_midi is not None:
-                    target_note = note_label(float(target_midi))[0]
-                    target_hz = hz_from_midi(float(target_midi))
-                    error_cents = (
-                        rendered_analysis.anchor_midi - float(target_midi)
-                    ) * 100.0
-                    worst_error_cents = max(worst_error_cents, abs(error_cents))
+            rate = 2.0 ** (
+                (target_midi - source_analysis.anchor_midi) / 12.0
+            )
+            rendered = playback_rate_resample(samples, rate)
+            rendered_analysis = analyze_pitch(rendered, sample_rate)
+            target_note = note_label(float(target_midi))[0]
+            target_hz = hz_from_midi(float(target_midi))
+            error_cents = (
+                rendered_analysis.anchor_midi - float(target_midi)
+            ) * 100.0
+            worst_error_cents = max(worst_error_cents, abs(error_cents))
 
-                if args.write_wavs:
-                    target_part = target_note or "raw"
-                    filename = (
-                        f"{chord_index + 1}-{safe_file_part(chord_name)}_"
-                        f"{sample_name}_{tier_index + 1}-{tier_name}_"
-                        f"{safe_file_part(target_part)}_rate-{rate:.8f}.wav"
-                    )
-                    write_pcm16_wav(temp_dir / filename, sample_rate, rendered)
-
-                mappings.append(
-                    {
-                        "chord_index": chord_index,
-                        "chord": chord_name,
-                        "sample": sample_name,
-                        "tier_index": tier_index,
-                        "tier": tier_name,
-                        "source_anchor_hz": source_analysis.anchor_hz,
-                        "source_anchor_midi": source_analysis.anchor_midi,
-                        "target_note": target_note,
-                        "target_hz": target_hz,
-                        "target_midi": target_midi,
-                        "playback_rate": rate,
-                        "remeasured_hz": rendered_analysis.anchor_hz,
-                        "remeasured_midi": rendered_analysis.anchor_midi,
-                        "target_error_cents": error_cents,
-                        "remeasured_voiced_min_hz": rendered_analysis.voiced_min_hz,
-                        "remeasured_voiced_max_hz": rendered_analysis.voiced_max_hz,
-                    }
+            if args.write_wavs:
+                filename = (
+                    f"{sample_name}_{tier_index + 1}-{tier_name}_"
+                    f"{safe_file_part(target_note)}_rate-{rate:.8f}.wav"
                 )
+                write_pcm16_wav(temp_dir / filename, sample_rate, rendered)
+
+            mappings.append(
+                {
+                    "sample": sample_name,
+                    "tier_index": tier_index,
+                    "tier": tier_name,
+                    "source_anchor_hz": source_analysis.anchor_hz,
+                    "source_anchor_midi": source_analysis.anchor_midi,
+                    "target_note": target_note,
+                    "target_hz": target_hz,
+                    "target_midi": target_midi,
+                    "playback_rate": rate,
+                    "remeasured_hz": rendered_analysis.anchor_hz,
+                    "remeasured_midi": rendered_analysis.anchor_midi,
+                    "target_error_cents": error_cents,
+                    "remeasured_voiced_min_hz": rendered_analysis.voiced_min_hz,
+                    "remeasured_voiced_max_hz": rendered_analysis.voiced_max_hz,
+                }
+            )
 
     report = {
         "method": {
             "detector": "frame-wise YIN",
             "anchor": "RMS × confidence weighted median of voiced-frame MIDI",
             "a4_hz": A4_HZ,
-            "tier_rule": (
-                "second chord tone above, nearest chord tone above, "
-                "unshifted original, nearest chord tone below"
-            ),
+            "scale": "A minor pentatonic: A, C, D, E, G",
+            "tier_rule": "fixed target MIDI per sample and screen key",
+            "nearest_minor_tier_index": 2,
         },
         "sources": {
             name: serialise_analysis(values[2]) for name, values in sources.items()

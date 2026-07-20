@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Executes the actual pitch-mapping declarations/functions extracted from
-// main.js, then compares every sample/chord/tier rate with the analyzer report.
+// main.js, then compares every fixed sample/tier rate with the analyzer report.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,35 +37,36 @@ function extractFunction(name) {
 }
 
 const declarations = [
-  extractDeclaration(/const CHORDS = \[[\s\S]*?\n\];/, 'CHORDS'),
   extractDeclaration(
     /const BARK_SOURCE_MIDI = Object\.freeze\(\{[\s\S]*?\n\}\);/,
     'BARK_SOURCE_MIDI',
   ),
   extractDeclaration(
-    /const ORIGINAL_PITCH_TIER = \d+;/,
-    'ORIGINAL_PITCH_TIER',
+    /const BARK_TARGET_MIDI = Object\.freeze\(\{[\s\S]*?\n\}\);/,
+    'BARK_TARGET_MIDI',
   ),
 ].join('\n');
+
+const runtimeRateFunction = extractFunction('barkPlaybackRate');
+if (!/^function barkPlaybackRate\(sample, pitchTier\)/.test(runtimeRateFunction)) {
+  throw new Error('barkPlaybackRate must depend only on sample and fixed pitch tier');
+}
 
 const sandbox = {};
 vm.runInNewContext(
   `
-  const S16 = 1;
-  let startTime = 0;
   let cols = 4;
   let rows = 3;
   let zones = [];
   let stageMetrics = { width: 1200, height: 800 };
   function getStageMetrics() { return stageMetrics; }
   ${declarations}
-  ${extractFunction('chordIndexAt')}
-  ${extractFunction('barkPlaybackRate')}
+  ${runtimeRateFunction}
   ${extractFunction('buildGrid')}
   globalThis.mappingApi = {
-    chordIndexAt,
     barkPlaybackRate,
     sourceMidi: BARK_SOURCE_MIDI,
+    targetMidi: BARK_TARGET_MIDI,
     buildLayout(width, height) {
       stageMetrics = { width, height };
       buildGrid();
@@ -83,50 +84,57 @@ vm.runInNewContext(
 const { mappingApi } = sandbox;
 let checked = 0;
 for (const mapping of report.mappings) {
-  const when = mapping.chord_index * 16;
-  const actualChord = mappingApi.chordIndexAt(when);
-  if (actualChord !== mapping.chord_index) {
-    throw new Error(
-      `Chord mismatch at ${when}: expected ${mapping.chord_index}, got ${actualChord}`,
-    );
-  }
-
   const actualRate = mappingApi.barkPlaybackRate(
     mapping.sample,
     mapping.tier_index,
-    when,
   );
   if (Math.abs(actualRate - mapping.playback_rate) > 1e-10) {
     throw new Error(
-      `${mapping.chord}/${mapping.sample}/${mapping.tier}: ` +
+      `${mapping.sample}/${mapping.tier}: ` +
       `expected ${mapping.playback_rate}, got ${actualRate}`,
     );
+  }
+  // Repeated calls and irrelevant extra arguments must never alter a key's pitch.
+  const repeatedRate = mappingApi.barkPlaybackRate(
+    mapping.sample,
+    mapping.tier_index,
+    999999,
+  );
+  if (repeatedRate !== actualRate) {
+    throw new Error(`${mapping.sample}/${mapping.tier}: rate is not stable`);
   }
   checked++;
 }
 
-for (const chord of ['C', 'G', 'Am', 'F']) {
-  for (const sample of ['da', 'gou', 'jiao']) {
-    const rows = report.mappings
-      .filter(item => item.chord === chord && item.sample === sample)
-      .sort((left, right) => left.tier_index - right.tier_index);
-    const sourceMidi = mappingApi.sourceMidi[sample];
-    const targetMidis = [
-      rows[0].target_midi,
-      rows[1].target_midi,
-      sourceMidi,
-      rows[3].target_midi,
-    ];
-    if (!(
-      targetMidis[0] > targetMidis[1] &&
-      targetMidis[1] > targetMidis[2] &&
-      targetMidis[2] > targetMidis[3]
-    )) {
-      throw new Error(`${chord}/${sample}: pitch tiers are not strictly descending`);
+const minorPentatonicPitchClasses = new Set([9, 0, 2, 4, 7]);
+for (const sample of ['da', 'gou', 'jiao']) {
+  const rows = report.mappings
+    .filter(item => item.sample === sample)
+    .sort((left, right) => left.tier_index - right.tier_index);
+  if (rows.length !== 4) {
+    throw new Error(`${sample}: expected four fixed pitch keys`);
+  }
+  for (const row of rows) {
+    if (!minorPentatonicPitchClasses.has(row.target_midi % 12)) {
+      throw new Error(`${sample}/${row.tier}: target is outside A minor pentatonic`);
     }
-    if (rows[2].playback_rate !== 1) {
-      throw new Error(`${chord}/${sample}: original tier is not rate 1`);
+    if (mappingApi.targetMidi[sample][row.tier_index] !== row.target_midi) {
+      throw new Error(`${sample}/${row.tier}: runtime target MIDI mismatch`);
     }
+  }
+
+  const sourceMidi = mappingApi.sourceMidi[sample];
+  const candidates = [];
+  for (let midi = 24; midi <= 108; midi++) {
+    if (minorPentatonicPitchClasses.has(midi % 12)) candidates.push(midi);
+  }
+  const nearest = candidates.reduce((best, midi) =>
+    Math.abs(midi - sourceMidi) < Math.abs(best - sourceMidi) ? midi : best
+  );
+  if (rows[2].target_midi !== nearest) {
+    throw new Error(
+      `${sample}: tier 3 is ${rows[2].target_midi}, nearest minor note is ${nearest}`,
+    );
   }
 }
 
@@ -140,7 +148,7 @@ for (let row = 0; row < 3; row++) {
     throw new Error(`Landscape row ${row}: pitch tiers do not run 0,1,2,3`);
   }
   if (rowZones[2].pitchTier !== 2) {
-    throw new Error(`Landscape row ${row}: original is not in column 3`);
+    throw new Error(`Landscape row ${row}: nearest-minor key is not in column 3`);
   }
 }
 
@@ -155,11 +163,12 @@ for (let row = 0; row < 4; row++) {
   }
 }
 if (portrait.zones.slice(6, 9).some(zone => zone.pitchTier !== 2)) {
-  throw new Error('Portrait original is not in row 3');
+  throw new Error('Portrait nearest-minor keys are not in row 3');
 }
 
-console.log(`Runtime pitch mapping verified: ${checked} sample/chord/tier cases`);
-console.log('Layout verified: landscape column 3 and portrait row 3 are original');
+console.log(`Runtime fixed pitch mapping verified: ${checked} sample/tier keys`);
+console.log('Repeated-key pitch stability verified: no chord/time-dependent switching');
+console.log('Layout verified: column 3 / row 3 use the nearest minor-pentatonic note');
 console.log(
   `Worst remeasured transposed error: ` +
   `${report.worst_transposed_target_error_cents.toFixed(3)} cents`,
