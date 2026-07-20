@@ -407,48 +407,47 @@ function fxResize() {
 }
 
 /* ---------- 各特效的随机参数预生成（出生即定型，之后纯函数绘制） ----------
- * 所有尺寸按屏幕对角线 / 短边尽量取大，保证铺满全屏不留空 */
+ * 中心化特效最大直径 ≈ 0.85~0.92 倍屏幕短边；
+ * 零散小元件（纸屑 / 星星 / 几何雨）则随机散布全屏任意位置 */
 const BUILD = {
   rings(inst, rng) {
-    const maxD = Math.hypot(fxW, fxH);
+    const minD = Math.min(fxW, fxH);
     for (let i = 0; i < 7; i++) inst.shapes.push({
       delay: i * 0.05,
-      rEnd: maxD * (0.2 + rng() * 0.42),
+      rEnd: minD * (0.13 + rng() * 0.29),   // 最大直径 ≈ 0.84 短边
       w: 3 + rng() * 7,
       color: pickColor(rng),
     });
-    inst.dotR = Math.min(fxW, fxH) * 0.07;
+    inst.dotR = minD * 0.07;
   },
   poly(inst, rng) {
     const sides = 3 + (rng() * 5 | 0);
-    const maxD = Math.hypot(fxW, fxH);
     const minD = Math.min(fxW, fxH);
-    [[0.95, C.amber, 0], [0.6, C.gray, 0.09], [0.34, C.amber, 0.18]].forEach(([s, color, d], i) =>
+    [[0.46, C.amber, 0], [0.3, C.gray, 0.09], [0.17, C.amber, 0.18]].forEach(([s, color, d], i) =>
       inst.shapes.push({
         sides, delay: d, color,
-        rEnd: maxD * s,
+        rEnd: minD * s,                       // 最大直径 ≈ 0.92 短边
         w: minD * (0.024 - i * 0.006),
       }));
   },
   spiral(inst, rng) {
-    const maxD = Math.hypot(fxW, fxH);
     const minD = Math.min(fxW, fxH);
     for (let i = 0; i < 36; i++) inst.shapes.push({
       ang: i * 0.55,
-      rad: 6 + i * maxD * 0.019,
+      rad: 6 + i * minD * 0.0125,             // 最大直径 ≈ 0.88 短边
       size: minD * (0.009 + i * 0.0008),
       delay: i * 0.018,
       color: pickColor(rng),
     });
   },
   rays(inst, rng) {
-    const maxD = Math.hypot(fxW, fxH);
+    const minD = Math.min(fxW, fxH);
     const n = 13 + (rng() * 4 | 0);
-    inst.r0 = Math.min(fxW, fxH) * 0.06;
+    inst.r0 = minD * 0.06;
     for (let i = 0; i < n; i++) inst.shapes.push({
       ang: (i / n) * 2 * Math.PI + rng() * 0.15,
       w: 0.09 + rng() * 0.13,
-      len: maxD * (0.6 + rng() * 0.35),
+      len: minD * (0.36 + rng() * 0.1),       // 最大直径 ≈ 0.92 短边
       delay: rng() * 0.12,
       color: rng() < 0.12 ? ACCENTS[(rng() * 3) | 0] : (i % 2 ? C.gray : C.amber),
     });
@@ -506,7 +505,7 @@ const BUILD = {
   },
   cross(inst, rng) {
     const minD = Math.min(fxW, fxH);
-    const size = minD * (0.75 + rng() * 0.35);
+    const size = minD * (0.6 + rng() * 0.25);   // 臂长 0.6~0.85 短边
     inst.shapes.push({
       size,
       w: size * (0.14 + rng() * 0.08),
@@ -519,7 +518,7 @@ const BUILD = {
     const n = 10;
     for (let i = 0; i < n; i++) inst.shapes.push({
       ang0: (i / n) * 2 * Math.PI,
-      rad: minD * (0.22 + rng() * 0.34),
+      rad: minD * (0.18 + rng() * 0.24),        // 轨道直径 ≤ 0.84 短边
       speed: inst.dir * (0.45 + rng() * 0.5),
       size: minD * (0.026 + rng() * 0.032),
       delay: rng() * 0.15,
@@ -555,7 +554,7 @@ const BUILD = {
   grid(inst, rng) {
     const minD = Math.min(fxW, fxH);
     const n = 11;
-    const radius = minD * 0.52;
+    const radius = minD * (0.4 + rng() * 0.04);   // 直径 0.8~0.88 短边
     const lines = [];
     for (let i = 0; i < n; i++) lines.push({
       y: (i - (n - 1) / 2) * (radius * 2 / n),
@@ -570,18 +569,18 @@ const BUILD = {
 /* ---------- 各特效的绘制（t = 出生至今秒数，fade = 退场透明度） ----------
  * beatP 为节拍脉冲：所有特效都随节拍明显缩放 / 增粗 / 增亮 */
 const DRAW = {
-  /* 同心环爆发：圆环不断扩张，随节拍呼吸增粗 */
+  /* 同心环爆发：圆环扩张后呼吸胀缩，随节拍增粗（律动只做运动，不变色） */
   rings(g, inst, t, fade) {
     const minD = Math.min(fxW, fxH);
-    for (const s of inst.shapes) {
+    inst.shapes.forEach((s, i) => {
       const k = easeOutCubic(prog(t, s.delay));
-      if (k <= 0) continue;
-      const r = k * s.rEnd + t * 16 + beatP * minD * 0.03;
-      g.globalAlpha = (1 - k * 0.5) * (0.55 + 0.45 * beatP) * fade;
+      if (k <= 0) return;
+      const r = k * s.rEnd * (1 + 0.04 * Math.sin(t * 1.4 + i)) + beatP * minD * 0.03;
+      g.globalAlpha = (1 - k * 0.5) * fade;
       g.strokeStyle = s.color;
       g.lineWidth = s.w * (1 + beatP * 1.3);
       g.beginPath(); g.arc(inst.cx, inst.cy, r, 0, 7); g.stroke();
-    }
+    });
     const dk = easeOutBack(prog(t, 0));
     if (dk > 0) {
       g.globalAlpha = fade;
@@ -593,17 +592,17 @@ const DRAW = {
   /* 多边形绽放：三层多边形描边放大并旋转，随节拍胀缩 */
   poly(g, inst, t, fade) {
     const minD = Math.min(fxW, fxH);
-    for (const s of inst.shapes) {
+    inst.shapes.forEach((s, i) => {
       const k = easeOutCubic(prog(t, s.delay));
-      if (k <= 0) continue;
-      const r = k * s.rEnd * (1 + beatP * 0.08) + t * 12;
+      if (k <= 0) return;
+      const r = k * s.rEnd * (1 + beatP * 0.08 + 0.03 * Math.sin(t * 1.1 + i * 1.9));
       const rot = inst.rot0 + inst.dir * (1 - k) * 1.3 + t * 0.18 * inst.dir;
       g.globalAlpha = (1 - k * 0.3) * fade;
       g.strokeStyle = s.color;
       g.lineWidth = s.w * (1 + beatP * 0.9) + beatP * minD * 0.004;
       tracePoly(g, inst.cx, inst.cy, r, s.sides, rot);
       g.stroke();
-    }
+    });
   },
 
   /* 螺旋弹珠：圆点沿螺旋线依次弹出，整体旋转，随节拍跳动 */
@@ -613,7 +612,7 @@ const DRAW = {
       const k = easeOutBack(prog(t, s.delay));
       if (k <= 0) return;
       const a = s.ang + rot;
-      const r = s.rad * k * (1 + beatP * 0.1) + t * 8;
+      const r = s.rad * k * (1 + beatP * 0.1) + Math.sin(t * 1.5 + i * 0.5) * 4;
       const x = inst.cx + Math.cos(a) * r;
       const y = inst.cy + Math.sin(a) * r;
       const sz = s.size * k * (1 + beatP * 0.6);
@@ -630,7 +629,7 @@ const DRAW = {
       const rot = inst.rot0 + inst.dir * (1 - k) * 0.8 + t * 0.14 * inst.dir;
       const len = s.len * k * (1 + beatP * 0.22);
       const a = s.ang + rot;
-      g.globalAlpha = (0.75 + 0.25 * beatP) * fade;
+      g.globalAlpha = 0.88 * fade;
       g.fillStyle = s.color;
       g.beginPath();
       g.moveTo(inst.cx, inst.cy);
@@ -776,7 +775,7 @@ const DRAW = {
   /* 旋转线栅：圆形视窗内平行线逐条展开，整体旋转，随节拍胀缩增粗 */
   grid(g, inst, t, fade) {
     const s = inst.shapes[0];
-    const R = s.radius * (1 + beatP * 0.16) + t * 6;
+    const R = s.radius * (1 + beatP * 0.16 + 0.03 * Math.sin(t * 1.3));
     g.save();
     g.translate(inst.cx, inst.cy);
     g.rotate(inst.rot0 + t * 0.22 * inst.dir + beatP * 0.06 * inst.dir);

@@ -72,16 +72,16 @@
     display: block;
     filter: drop-shadow(0 18px 40px rgba(135, 131, 126, .4));
   }
-  #dog-close { transition: opacity .1s linear; }
+  /* 张嘴图叠在闭嘴图之上：下层始终不透明，只切换上层透明度，
+     避免交叉淡化时两张图都半透明导致整体变透明 */
   #dog-open {
     position: absolute;
     left: 0; top: 0;
     opacity: 0;
-    transition: opacity .1s linear;
+    transition: opacity .08s linear;
   }
   #dog-inner.bark { transform: scale(1.1) rotate(-2deg); }
   #dog-inner.bark #dog-open { opacity: 1; }
-  #dog-inner.bark #dog-close { opacity: 0; }
 
   /* 开始遮罩（首次点击解锁音频） */
   #overlay {
