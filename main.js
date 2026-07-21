@@ -443,7 +443,7 @@ async function openFeaturedVideo(options) {
     }
     if (optimisticUnlock && !state.cloudReadable) {
       showToyNotice(
-        '解锁失败，请确认已登录哔哩哔哩后刷新重试。',
+        '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
         true
       );
       return;
@@ -459,7 +459,7 @@ async function openFeaturedVideo(options) {
         markToyCloudUnavailable(state);
         console.warn('[大狗Tap] 音效解锁状态写入失败。', error);
         showToyNotice(
-          '解锁失败，请确认已登录哔哩哔哩后刷新重试。',
+          '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
           true
         );
         return;
@@ -481,8 +481,8 @@ async function openFeaturedVideo(options) {
       console.warn('[大狗Tap] Toy 视频导航失败。', error);
       showToyNotice(
         unlockedNow
-          ? '已完成解锁，但视频打开失败，请稍后重试。'
-          : '视频打开失败，请稍后重试。',
+          ? '已完成解锁，但视频打开失败，请稍后重试。多次失败建议更新APP。'
+          : '视频打开失败，请稍后重试。多次失败建议更新APP。',
         true
       );
     }
@@ -809,12 +809,12 @@ function markAllSfxNewSeen() {
 async function requireToyCloudContext() {
   const state = await toyStateReady;
   if (!state.environmentAvailable || !state.toy) {
-    showToyNotice('请在B站打开此页面后再解锁', true);
+    showToyNotice('请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁', true);
     return null;
   }
   if (!state.cloudReadable) {
     showToyNotice(
-      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。',
+      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
       true
     );
     return null;
