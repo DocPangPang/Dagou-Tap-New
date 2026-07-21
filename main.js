@@ -79,7 +79,7 @@ const RUNTIME_SAMPLE_NAMES = Object.freeze(
 );
 const buffers = {};       // 解码后的音效样本
 const sustainLoops = {};  // 从原样本中实时构建的 WSOLA 延音纹理
-let selectedSfxId = 'dagou';
+let selectedSfxId = 'hajimi';
 let hajimiAnimationEnabled = false;
 let hajimiAnimationReady = false;
 let hajimiAnimationRequested = false;
@@ -176,7 +176,8 @@ const TOY_REQUIRED_ABILITIES = Object.freeze([
   'setCloudStorage',
   'navigate',
 ]);
-const LOCKED_SFX_IDS = new Set(['dingdong', 'hajimi']);
+const VIDEO_UNLOCK_ITEM_IDS = new Set(['dingdong', 'hajimi']);
+const LOCKED_SFX_IDS = new Set(['dingdong']);
 const DEBUG_UNLOCK_SFX = false; // 临时调试：发布前改回 false，恢复 Toy 云端锁定。
 let controlsIdleTimer = 0;
 let navigationMuted = false;
@@ -212,11 +213,24 @@ const updateDot = document.getElementById('update-dot');
 const settingsOverlay = document.getElementById('settings-overlay');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsClose = document.getElementById('settings-close');
+const unlockConfirmOverlay = document.getElementById('unlock-confirm-overlay');
+const unlockConfirmDialog = document.getElementById('unlock-confirm-dialog');
+const unlockConfirmTitle = document.getElementById('unlock-confirm-title');
+const unlockConfirmMessage = document.getElementById('unlock-confirm-message');
+const unlockConfirmCancel = document.getElementById('unlock-confirm-cancel');
+const unlockConfirmSubmit = document.getElementById('unlock-confirm-submit');
 const authorHomeButton = document.getElementById('author-home-button');
 const videoCard = document.getElementById('video-card');
 const videoPlay = videoCard.querySelector('.video-play');
 const sfxOptions = [...document.querySelectorAll('.sfx-option')];
 const hajimiOptionImage = document.getElementById('hajimi-option-image');
+const hajimiSkinSwitcher = document.getElementById('hajimi-skin-switcher');
+const hajimiSkinOptions = [
+  ...hajimiSkinSwitcher.querySelectorAll('.skin-option'),
+];
+const hajimiSkinClassic = hajimiSkinSwitcher.querySelector('[data-skin="classic"]');
+const hajimiSkinEmperor = hajimiSkinSwitcher.querySelector('[data-skin="emperor"]');
+const hajimiSkinEmperorHint = hajimiSkinEmperor.querySelector('.skin-hint');
 const performanceSettingButtons = [
   ...document.querySelectorAll('.setting-row[data-setting]'),
 ];
@@ -405,7 +419,11 @@ function openCreatorSpace() {
 
 let videoUnlockPending = false;
 
-async function openFeaturedVideo() {
+async function openFeaturedVideo(options) {
+  const optimisticUnlock = options?.optimisticUnlock === true;
+  const delayAfterCloudWriteMs = Number.isFinite(options?.delayAfterCloudWriteMs)
+    ? Math.max(0, options.delayAfterCloudWriteMs)
+    : 0;
   if (videoUnlockPending) return;
   videoUnlockPending = true;
   videoCard.setAttribute('aria-busy', 'true');
@@ -418,8 +436,21 @@ async function openFeaturedVideo() {
       return;
     }
 
+    const wasUnlocked = state.sfxUnlocked;
+    if (optimisticUnlock && !wasUnlocked) {
+      state.sfxUnlocked = true;
+      renderToyCloudState();
+    }
+    if (optimisticUnlock && !state.cloudReadable) {
+      showToyNotice(
+        '解锁失败，请确认已登录哔哩哔哩后刷新重试。',
+        true
+      );
+      return;
+    }
+
     let unlockedNow = false;
-    if (state.cloudReadable && !state.sfxUnlocked) {
+    if (state.cloudReadable && !wasUnlocked) {
       try {
         await state.toy.setCloudStorage({
           [TOY_CLOUD_KEYS.sfxUnlocked]: '1',
@@ -437,6 +468,9 @@ async function openFeaturedVideo() {
       state.sfxUnlocked = true;
       unlockedNow = true;
       renderToyCloudState();
+      if (delayAfterCloudWriteMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayAfterCloudWriteMs));
+      }
     }
 
     try {
@@ -482,6 +516,8 @@ sfxToggle.addEventListener('click', toggleSoundEffects);
 
 /* ---------- 设置菜单与 Toy 云状态 ---------- */
 let settingsOpen = false;
+let unlockConfirmOpen = false;
+let unlockConfirmTrigger = null;
 let toyNoticeTimer = 0;
 const toyCloudState = {
   toy: null,
@@ -629,7 +665,7 @@ function renderToyCloudState() {
     const locked = isCloudLockedOption && !toyCloudState.sfxUnlocked;
     option.classList.toggle('is-locked', locked);
 
-    if (isCloudLockedOption) {
+    if (VIDEO_UNLOCK_ITEM_IDS.has(sfxId)) {
       const label = sfxId === 'dingdong' ? '叮咚鸡' : '哈基米';
       option.setAttribute('aria-label', locked ? `${label}，未解锁` : label);
       option.classList.toggle('is-new-hidden', toyCloudState.newSeen[sfxId]);
@@ -743,7 +779,7 @@ function markSettingsSeen() {
 }
 
 function markSfxNewSeen(sfxId) {
-  if (!LOCKED_SFX_IDS.has(sfxId) || toyCloudState.newSeen[sfxId]) return;
+  if (!VIDEO_UNLOCK_ITEM_IDS.has(sfxId) || toyCloudState.newSeen[sfxId]) return;
   toyCloudState.newSeen[sfxId] = true;
   toyCloudState.locallyChanged[sfxId] = true;
   renderToyCloudState();
@@ -755,7 +791,7 @@ function markSfxNewSeen(sfxId) {
 
 function markAllSfxNewSeen() {
   const items = {};
-  for (const sfxId of LOCKED_SFX_IDS) {
+  for (const sfxId of VIDEO_UNLOCK_ITEM_IDS) {
     if (toyCloudState.newSeen[sfxId]) continue;
     toyCloudState.newSeen[sfxId] = true;
     toyCloudState.locallyChanged[sfxId] = true;
@@ -773,7 +809,7 @@ function markAllSfxNewSeen() {
 async function requireToyCloudContext() {
   const state = await toyStateReady;
   if (!state.environmentAvailable || !state.toy) {
-    showToyNotice('请在哔哩哔哩内打开', true);
+    showToyNotice('请在B站打开此页面后再解锁', true);
     return null;
   }
   if (!state.cloudReadable) {
@@ -786,27 +822,91 @@ async function requireToyCloudContext() {
   return state;
 }
 
+function openUnlockConfirm(unlockItem, trigger) {
+  if (unlockConfirmOpen || videoUnlockPending) return;
+  const itemLabel = unlockItem === 'emperor'
+    ? '哈基米（帝皇）'
+    : '叮咚鸡';
+  unlockConfirmOpen = true;
+  unlockConfirmTrigger = trigger ?? null;
+  unlockConfirmTitle.textContent = `解锁${itemLabel}`;
+  unlockConfirmMessage.textContent =
+    `${itemLabel}尚未解锁。观看开发视频即可同时解锁叮咚鸡和哈基米（帝皇），是否现在跳转？`;
+  settingsOverlay.inert = true;
+  unlockConfirmOverlay.inert = false;
+  unlockConfirmOverlay.classList.add('is-open');
+  unlockConfirmOverlay.setAttribute('aria-hidden', 'false');
+  unlockConfirmSubmit.focus({ preventScroll: true });
+}
+
+function closeUnlockConfirm(restoreFocus = true) {
+  if (!unlockConfirmOpen || videoUnlockPending) return;
+  const trigger = unlockConfirmTrigger;
+  unlockConfirmOpen = false;
+  unlockConfirmTrigger = null;
+  unlockConfirmOverlay.inert = true;
+  unlockConfirmOverlay.classList.remove('is-open');
+  unlockConfirmOverlay.setAttribute('aria-hidden', 'true');
+  if (settingsOpen) settingsOverlay.inert = false;
+  if (restoreFocus && settingsOpen) {
+    (trigger ?? settingsClose).focus({ preventScroll: true });
+  }
+}
+
+function setUnlockConfirmPending(pending) {
+  unlockConfirmCancel.disabled = pending;
+  unlockConfirmSubmit.disabled = pending;
+  unlockConfirmSubmit.textContent = pending ? '跳转中…' : '前往视频解锁';
+  if (pending) unlockConfirmSubmit.setAttribute('aria-busy', 'true');
+  else unlockConfirmSubmit.removeAttribute('aria-busy');
+}
+
+async function confirmUnlockFromVideo() {
+  if (!unlockConfirmOpen || videoUnlockPending) return;
+  setUnlockConfirmPending(true);
+  try {
+    await openFeaturedVideo({
+      optimisticUnlock: true,
+      delayAfterCloudWriteMs: 500,
+    });
+  } finally {
+    setUnlockConfirmPending(false);
+    closeUnlockConfirm();
+  }
+}
+
+/* 哈基米音效卡本身永不显示锁：皮肤切换收敛到独立的形象切换行，
+   帝皇的锁与 NEW 只挂在帝皇选项上，避免“哈基米被锁”的歧义。 */
 function renderHajimiCharacterControl() {
   const option = sfxOptions.find((item) => item.dataset.sfx === 'hajimi');
   if (!option) return;
 
   const isSelected = selectedSfxId === 'hajimi';
-  option.classList.toggle('is-character-toggle', isSelected);
-  option.classList.toggle(
-    'is-animation-active',
-    isSelected && hajimiAnimationEnabled
+  const emperorLocked = !toyCloudState.sfxUnlocked;
+
+  hajimiSkinSwitcher.classList.toggle('is-open', isSelected);
+  hajimiSkinSwitcher.setAttribute('aria-hidden', String(!isSelected));
+  for (const button of hajimiSkinOptions) {
+    button.disabled = !isSelected;
+  }
+
+  hajimiSkinClassic.classList.toggle('is-active', !hajimiAnimationEnabled);
+  hajimiSkinClassic.setAttribute('aria-checked', String(!hajimiAnimationEnabled));
+  hajimiSkinEmperor.classList.toggle('is-active', hajimiAnimationEnabled);
+  hajimiSkinEmperor.setAttribute('aria-checked', String(hajimiAnimationEnabled));
+  hajimiSkinEmperor.classList.toggle('is-locked', emperorLocked);
+  hajimiSkinEmperor.classList.toggle('is-new-hidden', toyCloudState.newSeen.hajimi);
+  hajimiSkinEmperorHint.textContent = emperorLocked ? '观看开发视频后解锁' : '已解锁';
+  hajimiSkinEmperor.setAttribute(
+    'aria-label',
+    emperorLocked ? '哈基米帝皇形象，观看开发视频后解锁' : '哈基米帝皇形象'
   );
+
   hajimiOptionImage.src = isSelected && hajimiAnimationEnabled
     ? HAJIMI_ANIMATION_ICON_URL
     : HAJIMI_STATIC_ICON_URL;
 
-  if (option.classList.contains('is-locked')) return;
-  const currentVisual = hajimiAnimationEnabled
-    ? `东海帝皇循环动画${hajimiAnimationReady ? '' : '（加载中）'}`
-    : '哈基米形象';
-  const label = isSelected
-    ? `哈基米音效已启用，点击切换形象；当前为${currentVisual}`
-    : '哈基米';
+  const label = isSelected ? '哈基米音效已启用' : '哈基米';
   option.setAttribute('aria-label', label);
   option.title = label;
 }
@@ -883,10 +983,11 @@ function ensureHajimiAnimationLoaded() {
   dogAnimationAtlas.src = HAJIMI_ATLAS_URL;
 }
 
-function toggleHajimiCharacter() {
+function setHajimiSkin(useEmperor) {
   if (selectedSfxId !== 'hajimi') return;
-  hajimiAnimationEnabled = !hajimiAnimationEnabled;
-  if (hajimiAnimationEnabled) {
+  if (useEmperor === hajimiAnimationEnabled) return;
+  hajimiAnimationEnabled = useEmperor;
+  if (useEmperor) {
     alignHajimiAnimationToBeat();
     ensureHajimiAnimationLoaded();
     if (!hajimiAnimationReady) showToyNotice('正在加载东海帝皇动画…');
@@ -897,7 +998,7 @@ function toggleHajimiCharacter() {
 function selectSfxOption(option) {
   selectedSfxId = SFX_SAMPLE_SETS[option.dataset.sfx]
     ? option.dataset.sfx
-    : 'dagou';
+    : 'hajimi';
   hajimiAnimationEnabled = false;
   const characterImages = CHARACTER_IMAGE_SETS[selectedSfxId]
     ?? CHARACTER_IMAGE_SETS.dagou;
@@ -910,16 +1011,56 @@ function selectSfxOption(option) {
     other.classList.toggle('is-active', selected);
     other.setAttribute('aria-checked', String(selected));
   }
-  if (selectedSfxId === 'hajimi') ensureHajimiAnimationLoaded();
   applyHajimiAnimationVisibility();
 }
 
-function activateSfxOption(option) {
-  if (option.dataset.sfx === 'hajimi' && selectedSfxId === 'hajimi') {
-    toggleHajimiCharacter();
+async function handleSfxOptionClick(option) {
+  const sfxId = option.dataset.sfx;
+  const requiresVideoUnlock = LOCKED_SFX_IDS.has(sfxId);
+  if (!requiresVideoUnlock) {
+    selectSfxOption(option);
     return;
   }
+
+  markSfxNewSeen(sfxId);
+  if (toyCloudState.sfxUnlocked) {
+    selectSfxOption(option);
+    return;
+  }
+
+  const state = await requireToyCloudContext();
+  if (!state) return;
+  if (!state.sfxUnlocked) {
+    openUnlockConfirm('dingdong', option);
+    return;
+  }
+
   selectSfxOption(option);
+}
+
+/* 形象切换行只在选中哈基米时可见可点：原皮随意换回；
+   帝皇未解锁时点击只引导去看开发视频，绝不影响哈基米音效本身。 */
+async function handleSkinOptionClick(button) {
+  if (selectedSfxId !== 'hajimi') return;
+  if (button.dataset.skin !== 'emperor') {
+    setHajimiSkin(false);
+    return;
+  }
+
+  markSfxNewSeen('hajimi');
+  if (toyCloudState.sfxUnlocked) {
+    setHajimiSkin(true);
+    return;
+  }
+
+  const state = await requireToyCloudContext();
+  if (!state) return;
+  if (!state.sfxUnlocked) {
+    openUnlockConfirm('emperor', button);
+    return;
+  }
+
+  setHajimiSkin(true);
 }
 
 function resolveSfxSample(sample, sfxId = selectedSfxId) {
@@ -1007,6 +1148,7 @@ function openSettings() {
 
 function closeSettings() {
   if (!settingsOpen) return;
+  if (unlockConfirmOpen) closeUnlockConfirm(false);
   markAllSfxNewSeen();
   settingsOpen = false;
   settingsOverlay.inert = true;
@@ -1030,37 +1172,25 @@ for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercanc
   settingsOverlay.addEventListener(eventName, (event) => event.stopPropagation());
 }
 settingsPanel.addEventListener('click', (event) => event.stopPropagation());
+unlockConfirmCancel.addEventListener('click', () => closeUnlockConfirm());
+unlockConfirmSubmit.addEventListener('click', () => {
+  void confirmUnlockFromVideo();
+});
+unlockConfirmOverlay.addEventListener('pointerdown', (event) => {
+  if (event.target === unlockConfirmOverlay) closeUnlockConfirm();
+});
+for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+  unlockConfirmOverlay.addEventListener(eventName, (event) => event.stopPropagation());
+}
+unlockConfirmDialog.addEventListener('click', (event) => event.stopPropagation());
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeSettings();
+  if (event.key !== 'Escape') return;
+  if (unlockConfirmOpen) closeUnlockConfirm();
+  else closeSettings();
 });
 
 authorHomeButton.addEventListener('click', handleAuthorHomeClick);
 videoCard.addEventListener('click', openFeaturedVideo);
-
-async function handleSfxOptionClick(option) {
-  const sfxId = option.dataset.sfx;
-  if (!LOCKED_SFX_IDS.has(sfxId)) {
-    activateSfxOption(option);
-    return;
-  }
-
-  markSfxNewSeen(sfxId);
-  if (toyCloudState.sfxUnlocked) {
-    activateSfxOption(option);
-    return;
-  }
-
-  const state = await requireToyCloudContext();
-  if (!state) return;
-  if (!state.sfxUnlocked) {
-    showToyNotice(
-      '该音效尚未解锁，请点击上方开发视频，观看一次即可解锁。'
-    );
-    return;
-  }
-
-  activateSfxOption(option);
-}
 
 /* 三套音效都保留 da / gou / jiao 的语义位置，只替换实际播放采样。 */
 for (const option of sfxOptions) {
@@ -1068,15 +1198,11 @@ for (const option of sfxOptions) {
     void handleSfxOptionClick(option);
   });
 }
-
-for (const eventName of ['pointerdown', 'pointermove', 'pointerup']) {
-  authorLink.addEventListener(eventName, (event) => event.stopPropagation());
+for (const button of hajimiSkinOptions) {
+  button.addEventListener('click', () => {
+    void handleSkinOptionClick(button);
+  });
 }
-authorLink.addEventListener('click', (event) => {
-  event.preventDefault();
-  event.stopPropagation();
-  openCreatorSpace();
-});
 
 document.addEventListener(
   'pointerdown',

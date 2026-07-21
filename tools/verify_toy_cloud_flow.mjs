@@ -85,15 +85,19 @@ const functionNames = [
   'markSfxNewSeen',
   'markAllSfxNewSeen',
   'requireToyCloudContext',
+  'openUnlockConfirm',
+  'closeUnlockConfirm',
+  'setUnlockConfirmPending',
+  'confirmUnlockFromVideo',
   'renderHajimiCharacterControl',
   'getAudioBeatPosition',
   'alignHajimiAnimationToBeat',
   'renderHajimiAnimationFrame',
   'applyHajimiAnimationVisibility',
   'ensureHajimiAnimationLoaded',
-  'toggleHajimiCharacter',
+  'setHajimiSkin',
   'selectSfxOption',
-  'activateSfxOption',
+  'handleSkinOptionClick',
   'openSettings',
   'closeSettings',
   'handleAuthorHomeClick',
@@ -144,12 +148,31 @@ function makeToy({
 
 function makeHarness(toy) {
   const options = [
-    new FakeElement({ classes: ['sfx-option', 'is-active'], dataset: { sfx: 'dagou' } }),
+    new FakeElement({ classes: ['sfx-option'], dataset: { sfx: 'dagou' } }),
     new FakeElement({ classes: ['sfx-option', 'is-locked'], dataset: { sfx: 'dingdong' } }),
-    new FakeElement({ classes: ['sfx-option', 'is-locked'], dataset: { sfx: 'hajimi' } }),
+    new FakeElement({
+      classes: ['sfx-option', 'is-active'],
+      dataset: { sfx: 'hajimi' },
+    }),
   ];
+  const hajimiSkinSwitcher = new FakeElement({
+    classes: ['skin-switcher', 'is-open'],
+  });
+  const hajimiSkinClassic = new FakeElement({
+    classes: ['skin-option', 'is-active'],
+    dataset: { skin: 'classic' },
+  });
+  const hajimiSkinEmperor = new FakeElement({
+    classes: ['skin-option', 'is-locked'],
+    dataset: { skin: 'emperor' },
+  });
+  const hajimiSkinEmperorHint = new FakeElement();
+  hajimiSkinEmperorHint.textContent = '观看开发视频后解锁';
   const dogCloseImage = new FakeElement();
+  dogCloseImage.src = 'Image/maodie_close_mouth.png';
+  dogCloseImage.alt = '哈基米';
   const dogOpenImage = new FakeElement();
+  dogOpenImage.src = 'Image/maodie_open_mouth.png';
   const dogAnimationCanvas = new FakeElement();
   const dogAnimationAtlas = new FakeElement();
   const dogAnimationDraws = [];
@@ -160,7 +183,8 @@ function makeHarness(toy) {
     },
   };
   const hajimiOptionImage = new FakeElement();
-  const dogInner = new FakeElement();
+  hajimiOptionImage.src = 'Image/maodie_close_mouth.png';
+  const dogInner = new FakeElement({ classes: ['is-hajimi'] });
   const notices = [];
   const performanceButtons = [
     new FakeElement({ dataset: { setting: 'pianoMode' } }),
@@ -169,6 +193,11 @@ function makeHarness(toy) {
   ];
   const muteLog = [];
   const externalNavigationLog = [];
+  const unlockConfirmOverlay = new FakeElement();
+  const unlockConfirmTitle = new FakeElement();
+  const unlockConfirmMessage = new FakeElement();
+  const unlockConfirmCancel = new FakeElement();
+  const unlockConfirmSubmit = new FakeElement();
   const context = vm.createContext({
     console: { warn() {} },
     window: {
@@ -179,7 +208,10 @@ function makeHarness(toy) {
         },
       },
     },
-    setTimeout: () => 1,
+    setTimeout: (callback) => {
+      if (typeof callback === 'function') callback();
+      return 1;
+    },
     clearTimeout() {},
     TOY_CLOUD_KEYS: {
       sfxUnlocked: 'dagou_sfx_unlocked_v1',
@@ -205,7 +237,8 @@ function makeHarness(toy) {
       'setCloudStorage',
       'navigate',
     ],
-    LOCKED_SFX_IDS: new Set(['dingdong', 'hajimi']),
+    VIDEO_UNLOCK_ITEM_IDS: new Set(['dingdong', 'hajimi']),
+    LOCKED_SFX_IDS: new Set(['dingdong']),
     SFX_SAMPLE_SETS: Object.freeze({
       dagou: Object.freeze({ da: 'da', gou: 'gou', jiao: 'jiao' }),
       hajimi: Object.freeze({ da: 'ha', gou: 'ji', jiao: 'mi' }),
@@ -241,7 +274,7 @@ function makeHarness(toy) {
     HAJIMI_ATLAS_FRAME_WIDTH: 360,
     HAJIMI_ATLAS_FRAME_HEIGHT: 514,
     HAJIMI_ANIMATION_FRAME_COUNT: 108,
-    selectedSfxId: 'dagou',
+    selectedSfxId: 'hajimi',
     hajimiAnimationEnabled: false,
     hajimiAnimationReady: false,
     hajimiAnimationRequested: false,
@@ -280,6 +313,11 @@ function makeHarness(toy) {
     FEATURED_VIDEO_URL: 'https://www.bilibili.com/video/BV1kNKU6REBg/',
     sfxOptions: options,
     hajimiOptionImage,
+    hajimiSkinSwitcher,
+    hajimiSkinOptions: [hajimiSkinClassic, hajimiSkinEmperor],
+    hajimiSkinClassic,
+    hajimiSkinEmperor,
+    hajimiSkinEmperorHint,
     dogCloseImage,
     dogOpenImage,
     dogAnimationCanvas,
@@ -293,7 +331,14 @@ function makeHarness(toy) {
     settingsOverlay: new FakeElement(),
     settingsButton: new FakeElement(),
     settingsClose: new FakeElement(),
+    unlockConfirmOverlay,
+    unlockConfirmTitle,
+    unlockConfirmMessage,
+    unlockConfirmCancel,
+    unlockConfirmSubmit,
     settingsOpen: false,
+    unlockConfirmOpen: false,
+    unlockConfirmTrigger: null,
     openCreatorSpace() {},
     videoUnlockPending: false,
     toyNoticeTimer: 0,
@@ -329,11 +374,20 @@ function makeHarness(toy) {
     dogAnimationAtlas,
     dogAnimationDraws,
     hajimiOptionImage,
+    hajimiSkinSwitcher,
+    hajimiSkinClassic,
+    hajimiSkinEmperor,
+    hajimiSkinEmperorHint,
     dogInner,
     performanceButtons,
     notices,
     muteLog,
     externalNavigationLog,
+    unlockConfirmOverlay,
+    unlockConfirmTitle,
+    unlockConfirmMessage,
+    unlockConfirmCancel,
+    unlockConfirmSubmit,
   };
 }
 
@@ -368,6 +422,16 @@ assert.match(
   mainSource,
   /const DEBUG_UNLOCK_SFX = (?:true|false);/,
   'temporary SFX unlock bypass must remain an explicit boolean'
+);
+assert.match(
+  htmlSource,
+  /<div id="author-link"[^>]*aria-hidden="true"/,
+  'the corner author credit must be decorative rather than a link'
+);
+assert.doesNotMatch(
+  mainSource,
+  /authorLink\.addEventListener/,
+  'the corner author credit must not register navigation handlers'
 );
 
 const hajimiAtlasPath = new URL(
@@ -407,18 +471,90 @@ assert.ok(
   'missing Hajimi animation button icon',
 );
 
-for (const id of ['dingdong', 'hajimi']) {
-  const button = htmlSource.match(
-    new RegExp(`<button class="([^"]*)"[^>]*data-sfx="${id}"`)
-  );
-  assert.ok(button, `Missing ${id} option`);
-  assert.match(button[1], /\bis-locked\b/, `${id} must start locked`);
-}
+const dingdongButton = htmlSource.match(
+  /<button class="([^"]*)"[^>]*data-sfx="dingdong"/
+);
+assert.ok(dingdongButton, 'Missing dingdong option');
+assert.match(dingdongButton[1], /\bis-locked\b/, 'dingdong must start locked');
 const dagouButton = htmlSource.match(
   /<button class="([^"]*)"[^>]*data-sfx="dagou"/
 );
 assert.ok(dagouButton);
 assert.doesNotMatch(dagouButton[1], /\bis-locked\b/, 'dagou must stay unlocked');
+assert.doesNotMatch(dagouButton[1], /\bis-active\b/, 'dagou must not be the default');
+const hajimiButton = htmlSource.match(
+  /<button class="([^"]*)"[^>]*data-sfx="hajimi"/
+);
+assert.ok(hajimiButton, 'Missing hajimi option');
+assert.doesNotMatch(
+  hajimiButton[1],
+  /\bis-locked\b/,
+  'original Hajimi must stay unlocked'
+);
+assert.match(hajimiButton[1], /\bis-active\b/, 'Hajimi must be the default');
+const hajimiButtonBlock = htmlSource.match(
+  /<button class="[^"]*"[^>]*data-sfx="hajimi"[\s\S]*?<\/button>/
+);
+assert.ok(hajimiButtonBlock, 'Missing hajimi option block');
+assert.doesNotMatch(
+  hajimiButtonBlock[0],
+  /sfx-lock|sfx-new/,
+  'the Hajimi sound card must never carry a lock or NEW badge'
+);
+assert.doesNotMatch(
+  htmlSource,
+  /is-character-(toggle|locked)|is-animation-active/,
+  'the ambiguous on-card character lock must be gone'
+);
+assert.match(
+  htmlSource,
+  /class="skin-switcher is-open" id="hajimi-skin-switcher"/,
+  'the skin switcher must start expanded for the default Hajimi'
+);
+const classicSkin = htmlSource.match(
+  /<button class="([^"]*)"[^>]*data-skin="classic"/
+);
+assert.ok(classicSkin, 'Missing classic skin option');
+assert.match(classicSkin[1], /\bis-active\b/, 'classic skin must be the default');
+assert.doesNotMatch(classicSkin[1], /\bis-locked\b/, 'classic skin is never locked');
+const emperorSkin = htmlSource.match(
+  /<button class="([^"]*)"[^>]*data-skin="emperor"/
+);
+assert.ok(emperorSkin, 'Missing emperor skin option');
+assert.match(
+  emperorSkin[1],
+  /\bis-locked\b/,
+  'only the emperor skin option starts locked'
+);
+const emperorSkinBlock = htmlSource.match(
+  /<button class="[^"]*"[^>]*data-skin="emperor"[\s\S]*?<\/button>/
+);
+assert.ok(emperorSkinBlock, 'Missing emperor skin block');
+assert.match(
+  emperorSkinBlock[0],
+  /sfx-lock[\s\S]*?skin-hint">观看开发视频后解锁/,
+  'the lock and the unlock hint must both live on the emperor skin option'
+);
+assert.match(
+  htmlSource,
+  /id="settings-hint" aria-hidden="true"[\s\S]*?settings-hint-arrow[\s\S]*?点击设置<br \/>切换大狗叫音效/,
+  'the settings hint must pair a prominent arrow with the switch-sound copy'
+);
+assert.match(
+  htmlSource,
+  /#top-controls\.has-update-dot #settings-hint\s*{\s*opacity:\s*1/,
+  'the settings hint must appear together with the red dot'
+);
+assert.match(
+  htmlSource,
+  /#settings-hint\s*{[^}]*pointer-events:\s*none/,
+  'the settings hint must never block stage taps'
+);
+assert.match(
+  htmlSource,
+  /id="dog-inner" class="is-hajimi"[\s\S]*?id="dog-close" src="Image\/maodie_close_mouth\.png" alt="哈基米"[\s\S]*?id="dog-open" src="Image\/maodie_open_mouth\.png"/,
+  'the stage must start with original Hajimi'
+);
 assert.match(
   htmlSource,
   /<img src="Image\/dingdongji_close_mouth\.png" alt="" draggable="false" \/>/,
@@ -464,8 +600,6 @@ assert.match(
   /id="dog-animation-atlas"[^>]*hidden[^>]*decoding="async"[^>]*fetchpriority="low"/,
   'the lossless atlas must be a lazy low-priority image'
 );
-assert.match(htmlSource, /content:\s*"换成帝皇"/, 'static Hajimi toggle label');
-assert.match(htmlSource, /content:\s*"换回哈基米"/, 'animated Hajimi toggle label');
 for (const [settingName, defaultChecked] of [
   ['pianoMode', 'false'],
   ['rhythmSnap', 'true'],
@@ -487,7 +621,15 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), false);
   assert.equal(harness.context.topControls.classList.contains('has-update-dot'), true);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), true);
-  assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), true);
+  assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), false);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-locked'),
+    true,
+    'the emperor skin chip starts locked instead of the Hajimi card'
+  );
+  assert.equal(harness.hajimiSkinEmperorHint.textContent, '观看开发视频后解锁');
+  assert.equal(harness.hajimiSkinSwitcher.classList.contains('is-open'), true);
+  assert.equal(option(harness, 'hajimi').classList.contains('is-active'), true);
   assert.equal(option(harness, 'dagou').classList.contains('is-locked'), false);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
@@ -514,7 +656,15 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), true);
   assert.equal(harness.context.topControls.classList.contains('has-update-dot'), false);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
-  assert.equal(option(harness, 'hajimi').classList.contains('is-new-hidden'), true);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-locked'),
+    false
+  );
+  assert.equal(harness.hajimiSkinEmperorHint.textContent, '已解锁');
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-new-hidden'),
+    true
+  );
   assert.deepEqual(
     { ...harness.context.performanceSettings },
     { pianoMode: true, rhythmSnap: false, showGrid: true },
@@ -527,7 +677,10 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), false);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), true);
   assert.equal(await harness.context.requireToyCloudContext(), null);
-  assert.equal(harness.notices.at(-1).message, '请在哔哩哔哩内打开');
+  assert.equal(
+    harness.notices.at(-1).message,
+    '请在B站打开此页面，跳转开发视频观看后解锁'
+  );
   await harness.context.openFeaturedVideo();
   assert.deepEqual(harness.externalNavigationLog, [
     'https://www.bilibili.com/video/BV1kNKU6REBg/',
@@ -546,38 +699,102 @@ for (const [settingName, defaultChecked] of [
 }
 
 {
+  const setup = makeToy({ profile: { nickname: '', avatar: '' } });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
+  assert.equal(harness.context.unlockConfirmOpen, false);
+  assert.equal(
+    harness.notices.at(-1).message,
+    '请在B站打开此页面，跳转开发视频观看后解锁'
+  );
+}
+
+{
+  const harness = makeHarness(null);
+  await initialize(harness);
+  await harness.context.handleSfxOptionClick(option(harness, 'dagou'));
+  assert.equal(harness.context.selectedSfxId, 'dagou');
+  assert.equal(option(harness, 'dagou').classList.contains('is-active'), true);
+  assert.equal(
+    harness.hajimiSkinSwitcher.classList.contains('is-open'),
+    false,
+    'the skin switcher must collapse when Hajimi is not selected'
+  );
+  assert.equal(harness.hajimiSkinClassic.disabled, true);
+  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  assert.equal(harness.context.selectedSfxId, 'hajimi');
+  assert.equal(option(harness, 'hajimi').classList.contains('is-active'), true);
+  assert.equal(harness.context.hajimiAnimationEnabled, false);
+  assert.equal(harness.dogAnimationAtlas.src, undefined);
+  assert.equal(harness.hajimiSkinSwitcher.classList.contains('is-open'), true);
+  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  assert.equal(
+    harness.notices.length,
+    0,
+    're-clicking the Hajimi card must not trigger the unlock flow'
+  );
+  await harness.context.handleSkinOptionClick(harness.hajimiSkinEmperor);
+  assert.equal(harness.context.hajimiAnimationEnabled, false);
+  assert.equal(
+    harness.notices.at(-1).message,
+    '请在B站打开此页面，跳转开发视频观看后解锁'
+  );
+}
+
+{
   const harness = makeHarness(null);
   await initialize(harness);
   harness.context.toyCloudState.sfxUnlocked = true;
   harness.context.renderToyCloudState();
-  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
   assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), false);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-locked'),
+    false
+  );
   assert.equal(option(harness, 'hajimi').classList.contains('is-active'), true);
   assert.equal(harness.dogCloseImage.src, 'Image/maodie_close_mouth.png');
   assert.equal(harness.dogCloseImage.alt, '哈基米');
   assert.equal(harness.dogOpenImage.src, 'Image/maodie_open_mouth.png');
   assert.equal(harness.dogInner.classList.contains('is-hajimi'), true);
   assert.equal(
-    option(harness, 'hajimi').classList.contains('is-character-toggle'),
+    harness.hajimiSkinClassic.classList.contains('is-active'),
     true
   );
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-active'),
+    false
+  );
+  assert.equal(harness.dogAnimationAtlas.src, undefined);
+  assert.equal(harness.hajimiOptionImage.src, 'Image/maodie_close_mouth.png');
+  assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), false);
+
+  // The emperor asset stays lazy until an unlocked user explicitly switches to it.
+  await harness.context.handleSkinOptionClick(harness.hajimiSkinEmperor);
   assert.equal(
     harness.dogAnimationAtlas.src,
     'Image/donghaidihuang_atlas.webp?v=20260721-beat-synced'
   );
-  assert.equal(harness.hajimiOptionImage.src, 'Image/maodie_close_mouth.png');
+  assert.equal(harness.context.hajimiAnimationEnabled, true);
   assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), false);
-  assert.equal(option(harness, 'hajimi').classList.contains('is-animation-active'), false);
-
-  // The first selection preloads the asset. A second click switches the visual,
-  // and a third click returns to the original Hajimi image pair.
   harness.context.hajimiAnimationReady = true;
-  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  harness.context.applyHajimiAnimationVisibility();
   assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), true);
   assert.equal(harness.dogCloseImage.alt, '');
   assert.equal(harness.dogAnimationCanvas.attributes.get('aria-hidden'), 'false');
   assert.equal(harness.hajimiOptionImage.src, 'Image/donghaidihuang_icon.webp');
-  assert.equal(option(harness, 'hajimi').classList.contains('is-animation-active'), true);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-active'),
+    true
+  );
+  assert.equal(
+    harness.hajimiSkinEmperor.attributes.get('aria-checked'),
+    'true'
+  );
+  assert.equal(
+    harness.hajimiSkinClassic.classList.contains('is-active'),
+    false
+  );
 
   harness.context.hajimiAnimationFrame = -1;
   harness.dogAnimationDraws.length = 0;
@@ -602,12 +819,19 @@ for (const [settingName, defaultChecked] of [
   harness.context.started = false;
   harness.context.ctx = null;
 
-  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  await harness.context.handleSkinOptionClick(harness.hajimiSkinClassic);
   assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), false);
   assert.equal(harness.dogAnimationCanvas.attributes.get('aria-hidden'), 'true');
   assert.equal(harness.dogCloseImage.alt, '哈基米');
   assert.equal(harness.hajimiOptionImage.src, 'Image/maodie_close_mouth.png');
-  assert.equal(option(harness, 'hajimi').classList.contains('is-animation-active'), false);
+  assert.equal(
+    harness.hajimiSkinClassic.classList.contains('is-active'),
+    true
+  );
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-active'),
+    false
+  );
 
   harness.context.selectSfxOption(option(harness, 'dingdong'));
   assert.equal(harness.dogCloseImage.src, 'Image/dingdongji_close_mouth.png');
@@ -618,7 +842,7 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.dogCloseImage.src, 'Image/dagou_close_mouth.png');
   assert.equal(harness.dogOpenImage.src, 'Image/dagou_open_mouth.png');
   assert.equal(harness.dogInner.classList.contains('is-hajimi'), false);
-  assert.equal(harness.notices.length, 0);
+  assert.match(harness.notices[0].message, /正在加载东海帝皇动画/);
 }
 
 {
@@ -627,7 +851,11 @@ for (const [settingName, defaultChecked] of [
   await initialize(harness);
   assert.equal(harness.context.toyCloudState.cloudReadable, false);
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), false);
-  assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), true);
+  assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), false);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-locked'),
+    true
+  );
   assert.equal(await harness.context.requireToyCloudContext(), null);
   assert.match(harness.notices.at(-1).message, /云端状态读取失败/);
   setup.log.length = 0;
@@ -685,6 +913,8 @@ for (const [settingName, defaultChecked] of [
   const setup = makeToy();
   const harness = makeHarness(setup.toy);
   await initialize(harness);
+  harness.context.settingsOpen = true;
+  harness.context.settingsOverlay.inert = false;
   setup.log.length = 0;
   await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
   await Promise.resolve();
@@ -695,7 +925,95 @@ for (const [settingName, defaultChecked] of [
     '1',
     'clicking a locked option must persist its NEW state'
   );
-  assert.match(harness.notices.at(-1).message, /点击上方开发视频/);
+  assert.equal(harness.context.unlockConfirmOpen, true);
+  assert.equal(harness.unlockConfirmOverlay.classList.contains('is-open'), true);
+  assert.equal(harness.unlockConfirmOverlay.inert, false);
+  assert.equal(harness.context.settingsOverlay.inert, true);
+  assert.equal(harness.unlockConfirmTitle.textContent, '解锁叮咚鸡');
+  assert.match(harness.unlockConfirmMessage.textContent, /是否现在跳转/);
+  assert.equal(harness.notices.length, 0);
+  harness.context.closeUnlockConfirm();
+  assert.equal(harness.context.unlockConfirmOpen, false);
+  assert.equal(harness.context.settingsOverlay.inert, false);
+  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  await Promise.resolve();
+  assert.equal(
+    harness.context.toyCloudState.newSeen.hajimi,
+    false,
+    'clicking the Hajimi card must not touch the emperor skin state'
+  );
+  await harness.context.handleSkinOptionClick(harness.hajimiSkinEmperor);
+  await Promise.resolve();
+  assert.equal(harness.context.hajimiAnimationEnabled, false);
+  assert.equal(option(harness, 'hajimi').classList.contains('is-active'), true);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-new-hidden'),
+    true
+  );
+  assert.equal(setup.storage.dagou_hajimi_new_seen_v1, '1');
+  assert.equal(harness.context.unlockConfirmOpen, true);
+  assert.equal(harness.unlockConfirmTitle.textContent, '解锁哈基米（帝皇）');
+  assert.match(harness.unlockConfirmMessage.textContent, /同时解锁叮咚鸡和哈基米（帝皇）/);
+}
+
+{
+  const setup = makeToy();
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  harness.context.settingsOpen = true;
+  harness.context.settingsOverlay.inert = false;
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
+  await Promise.resolve();
+  setup.log.length = 0;
+  assert.equal(harness.context.unlockConfirmOpen, true);
+
+  let releaseNavigationDelay = null;
+  harness.context.setTimeout = (callback, delay) => {
+    assert.equal(delay, 500, 'confirmed unlock navigation must wait 0.5 seconds');
+    releaseNavigationDelay = callback;
+    return 1;
+  };
+  const confirmation = harness.context.confirmUnlockFromVideo();
+  for (let i = 0; i < 5 && !releaseNavigationDelay; i++) {
+    await Promise.resolve();
+  }
+
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
+  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
+  assert.equal(harness.unlockConfirmSubmit.textContent, '跳转中…');
+  assert.equal(harness.unlockConfirmSubmit.disabled, true);
+  assert.deepEqual(setup.log, ['set:dagou_sfx_unlocked_v1']);
+  assert.equal(typeof releaseNavigationDelay, 'function');
+
+  releaseNavigationDelay();
+  await confirmation;
+
+  assert.deepEqual(setup.log, [
+    'set:dagou_sfx_unlocked_v1',
+    'navigate:video:BV1kNKU6REBg',
+  ]);
+  assert.equal(harness.unlockConfirmSubmit.textContent, '前往视频解锁');
+  assert.equal(harness.unlockConfirmSubmit.disabled, false);
+  assert.equal(harness.context.unlockConfirmOpen, false);
+}
+
+{
+  const setup = makeToy({ setError: new Error('write failed') });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
+  await harness.context.confirmUnlockFromVideo();
+
+  assert.equal(setup.log.includes('navigate:video:BV1kNKU6REBg'), false);
+  assert.equal(
+    harness.context.toyCloudState.sfxUnlocked,
+    true,
+    'a confirmed unlock must remain available for the current page after a cloud write failure'
+  );
+  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
+  assert.match(harness.notices.at(-1).message, /解锁失败/);
 }
 
 {
@@ -710,6 +1028,10 @@ for (const [settingName, defaultChecked] of [
   ]);
   assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-locked'),
+    false
+  );
 }
 
 {
@@ -769,6 +1091,26 @@ assert.match(
   /id="settings-overlay"[^>]*\binert\b/,
   'the settings dialog must start inert before JavaScript runs'
 );
+assert.match(
+  htmlSource,
+  /id="unlock-confirm-overlay"[^>]*aria-hidden="true"[^>]*\binert\b/,
+  'the centered unlock confirmation must start hidden and inert'
+);
+assert.match(
+  htmlSource,
+  /id="unlock-confirm-dialog"[^>]*role="dialog"[^>]*aria-modal="true"/,
+  'the unlock confirmation must expose modal dialog semantics'
+);
+assert.match(
+  htmlSource,
+  /id="unlock-confirm-submit"[^>]*>前往视频解锁<\/button>/,
+  'the unlock confirmation must provide an explicit video action'
+);
+assert.match(
+  mainSource,
+  /delayAfterCloudWriteMs:\s*500/,
+  'confirmed unlocks must wait 0.5 seconds after the cloud write'
+);
 
 {
   const setup = makeToy();
@@ -780,7 +1122,10 @@ assert.match(
   harness.context.settingsOpen = true;
   harness.context.closeSettings();
   assert.equal(option(harness, 'dingdong').classList.contains('is-new-hidden'), true);
-  assert.equal(option(harness, 'hajimi').classList.contains('is-new-hidden'), true);
+  assert.equal(
+    harness.hajimiSkinEmperor.classList.contains('is-new-hidden'),
+    true
+  );
 }
 
 const stagePointerStart = mainSource.indexOf("stage.addEventListener('pointerdown'");
@@ -793,14 +1138,20 @@ assert.doesNotMatch(
 );
 
 console.log('Toy cloud unlock flow verified:');
-console.log('- only dingdong and hajimi start locked');
-console.log('- unavailable cloud reads keep the red dot visible and options locked');
+console.log('- Hajimi original is the default and freely switches with Dagou');
+console.log('- the Hajimi sound card never shows a lock; the lock lives on the emperor skin chip');
+console.log('- only Dingdong and the dedicated emperor skin chip start locked');
+console.log('- the settings hint arrow appears and disappears together with the red dot');
+console.log('- unavailable cloud reads keep the red dot and premium items locked');
+console.log('- signed-in Toy users get a centered unlock confirmation');
+console.log('- confirmed unlocks update locally, persist to cloud, then wait 0.5s before navigation');
+console.log('- failed confirmed writes keep the current page temporarily unlocked without navigating');
 console.log('- cloud unlock is written before Toy video navigation');
 console.log('- videos still open outside Toy or without readable cloud state, without unlocking');
 console.log('- failed writes never navigate; failed navigation keeps the unlock');
 console.log('- settings red dot and per-option NEW states persist independently');
 console.log('- a visible red dot pins only the settings button while audio controls hide');
-console.log('- the temporary debug switch unlocks both options without Toy capabilities');
+console.log('- the temporary debug switch unlocks both premium items without Toy capabilities');
 console.log('- performance defaults, cloud restore/write, and local-only fallback switching');
-console.log('- active Hajimi button toggles the lazy-loaded looping character');
+console.log('- the emperor skin chip lazily loads and toggles the looping character');
 console.log('- Web Audio clock returns the lossless atlas to frame 0 every nine beats');
