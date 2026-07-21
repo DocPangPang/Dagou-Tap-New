@@ -63,12 +63,28 @@ const CHARACTER_IMAGE_SETS = Object.freeze({
     alt: '哈基米',
   }),
 });
+const HAJIMI_ATLAS_URL =
+  'Image/donghaidihuang_atlas.webp?v=20260721-beat-synced';
+const HAJIMI_STATIC_ICON_URL = 'Image/maodie_close_mouth.png';
+const HAJIMI_ANIMATION_ICON_URL = 'Image/donghaidihuang_icon.webp';
+const HAJIMI_ANIMATION_BEATS = 9;
+const HAJIMI_FRAMES_PER_BEAT = 12;
+const HAJIMI_ATLAS_COLUMNS = 12;
+const HAJIMI_ATLAS_FRAME_WIDTH = 360;
+const HAJIMI_ATLAS_FRAME_HEIGHT = 514;
+const HAJIMI_ANIMATION_FRAME_COUNT =
+  HAJIMI_ANIMATION_BEATS * HAJIMI_FRAMES_PER_BEAT;
 const RUNTIME_SAMPLE_NAMES = Object.freeze(
   [...new Set(Object.values(SFX_SAMPLE_SETS).flatMap(Object.values))]
 );
 const buffers = {};       // 解码后的音效样本
 const sustainLoops = {};  // 从原样本中实时构建的 WSOLA 延音纹理
 let selectedSfxId = 'dagou';
+let hajimiAnimationEnabled = false;
+let hajimiAnimationReady = false;
+let hajimiAnimationRequested = false;
+let hajimiAnimationFrame = -1;
+let hajimiAnimationEpochBeat = 0;
 
 // 每条纹理由多个波形相似的语音帧重叠生成。帧位置按黄金分割序列变化，
 // 再在目标附近寻找相关度最高的波形，避免固定短片段形成可辨识的循环节。
@@ -180,6 +196,9 @@ const dogInner  = document.getElementById('dog-inner');
 const dogJelly  = document.getElementById('dog-jelly');
 const dogCloseImage = document.getElementById('dog-close');
 const dogOpenImage = document.getElementById('dog-open');
+const dogAnimationCanvas = document.getElementById('dog-animation');
+const dogAnimationAtlas = document.getElementById('dog-animation-atlas');
+const dogAnimation2d = dogAnimationCanvas.getContext('2d', { alpha: true });
 const overlay   = document.getElementById('overlay');
 const keyGrid   = document.getElementById('key-grid');
 const flashLayer = document.getElementById('zoneflash');
@@ -197,6 +216,7 @@ const authorHomeButton = document.getElementById('author-home-button');
 const videoCard = document.getElementById('video-card');
 const videoPlay = videoCard.querySelector('.video-play');
 const sfxOptions = [...document.querySelectorAll('.sfx-option')];
+const hajimiOptionImage = document.getElementById('hajimi-option-image');
 const performanceSettingButtons = [
   ...document.querySelectorAll('.setting-row[data-setting]'),
 ];
@@ -615,6 +635,7 @@ function renderToyCloudState() {
       option.classList.toggle('is-new-hidden', toyCloudState.newSeen[sfxId]);
     }
   }
+  renderHajimiCharacterControl();
   renderPerformanceSettings();
 }
 
@@ -765,10 +786,119 @@ async function requireToyCloudContext() {
   return state;
 }
 
+function renderHajimiCharacterControl() {
+  const option = sfxOptions.find((item) => item.dataset.sfx === 'hajimi');
+  if (!option) return;
+
+  const isSelected = selectedSfxId === 'hajimi';
+  option.classList.toggle('is-character-toggle', isSelected);
+  option.classList.toggle(
+    'is-animation-active',
+    isSelected && hajimiAnimationEnabled
+  );
+  hajimiOptionImage.src = isSelected && hajimiAnimationEnabled
+    ? HAJIMI_ANIMATION_ICON_URL
+    : HAJIMI_STATIC_ICON_URL;
+
+  if (option.classList.contains('is-locked')) return;
+  const currentVisual = hajimiAnimationEnabled
+    ? `东海帝皇循环动画${hajimiAnimationReady ? '' : '（加载中）'}`
+    : '哈基米形象';
+  const label = isSelected
+    ? `哈基米音效已启用，点击切换形象；当前为${currentVisual}`
+    : '哈基米';
+  option.setAttribute('aria-label', label);
+  option.title = label;
+}
+
+function getAudioBeatPosition() {
+  return started && ctx && startTime > 0 && ctx.currentTime >= startTime
+    ? (ctx.currentTime - startTime) / SPB
+    : null;
+}
+
+function alignHajimiAnimationToBeat() {
+  const beatPosition = getAudioBeatPosition();
+  hajimiAnimationEpochBeat = Number.isFinite(beatPosition)
+    ? Math.ceil(beatPosition - 0.03)
+    : 0;
+  hajimiAnimationFrame = -1;
+}
+
+function renderHajimiAnimationFrame(beatPosition) {
+  if (!hajimiAnimationReady) return;
+  const relativeBeat = Number.isFinite(beatPosition)
+    ? beatPosition - hajimiAnimationEpochBeat
+    : 0;
+  const loopBeat = relativeBeat > 0
+    ? relativeBeat % HAJIMI_ANIMATION_BEATS
+    : 0;
+  const frameIndex = Math.min(
+    HAJIMI_ANIMATION_FRAME_COUNT - 1,
+    Math.floor(loopBeat * HAJIMI_FRAMES_PER_BEAT)
+  );
+  if (frameIndex === hajimiAnimationFrame) return;
+  hajimiAnimationFrame = frameIndex;
+
+  const sourceX =
+    (frameIndex % HAJIMI_ATLAS_COLUMNS) * HAJIMI_ATLAS_FRAME_WIDTH;
+  const sourceY =
+    Math.floor(frameIndex / HAJIMI_ATLAS_COLUMNS) * HAJIMI_ATLAS_FRAME_HEIGHT;
+  dogAnimation2d.clearRect(
+    0,
+    0,
+    HAJIMI_ATLAS_FRAME_WIDTH,
+    HAJIMI_ATLAS_FRAME_HEIGHT
+  );
+  dogAnimation2d.drawImage(
+    dogAnimationAtlas,
+    sourceX,
+    sourceY,
+    HAJIMI_ATLAS_FRAME_WIDTH,
+    HAJIMI_ATLAS_FRAME_HEIGHT,
+    0,
+    0,
+    HAJIMI_ATLAS_FRAME_WIDTH,
+    HAJIMI_ATLAS_FRAME_HEIGHT
+  );
+}
+
+function applyHajimiAnimationVisibility() {
+  const showAnimation =
+    selectedSfxId === 'hajimi' &&
+    hajimiAnimationEnabled &&
+    hajimiAnimationReady;
+  dogInner.classList.toggle('is-hajimi-animation', showAnimation);
+  dogAnimationCanvas.setAttribute('aria-hidden', String(!showAnimation));
+  if (showAnimation) renderHajimiAnimationFrame(getAudioBeatPosition());
+  const characterImages = CHARACTER_IMAGE_SETS[selectedSfxId]
+    ?? CHARACTER_IMAGE_SETS.dagou;
+  dogCloseImage.alt = showAnimation ? '' : characterImages.alt;
+  renderHajimiCharacterControl();
+}
+
+function ensureHajimiAnimationLoaded() {
+  if (hajimiAnimationReady || hajimiAnimationRequested) return;
+  hajimiAnimationRequested = true;
+  dogAnimationAtlas.src = HAJIMI_ATLAS_URL;
+}
+
+function toggleHajimiCharacter() {
+  if (selectedSfxId !== 'hajimi') return;
+  hajimiAnimationEnabled = !hajimiAnimationEnabled;
+  if (hajimiAnimationEnabled) {
+    alignHajimiAnimationToBeat();
+    ensureHajimiAnimationLoaded();
+    if (!hajimiAnimationReady) showToyNotice('正在加载东海帝皇动画…');
+  }
+  applyHajimiAnimationVisibility();
+}
+
 function selectSfxOption(option) {
   selectedSfxId = SFX_SAMPLE_SETS[option.dataset.sfx]
     ? option.dataset.sfx
     : 'dagou';
+  hajimiAnimationEnabled = false;
   const characterImages = CHARACTER_IMAGE_SETS[selectedSfxId]
     ?? CHARACTER_IMAGE_SETS.dagou;
   dogCloseImage.src = characterImages.close;
@@ -780,6 +910,16 @@ function selectSfxOption(option) {
     other.classList.toggle('is-active', selected);
     other.setAttribute('aria-checked', String(selected));
   }
+  if (selectedSfxId === 'hajimi') ensureHajimiAnimationLoaded();
+  applyHajimiAnimationVisibility();
+}
+
+function activateSfxOption(option) {
+  if (option.dataset.sfx === 'hajimi' && selectedSfxId === 'hajimi') {
+    toggleHajimiCharacter();
+    return;
+  }
+  selectSfxOption(option);
 }
 
 function resolveSfxSample(sample, sfxId = selectedSfxId) {
@@ -788,6 +928,23 @@ function resolveSfxSample(sample, sfxId = selectedSfxId) {
 
 renderToyCloudState();
 const toyStateReady = initializeToyCloudState();
+
+dogAnimationAtlas.addEventListener('load', () => {
+  hajimiAnimationReady = true;
+  if (hajimiAnimationEnabled) alignHajimiAnimationToBeat();
+  applyHajimiAnimationVisibility();
+});
+dogAnimationAtlas.addEventListener('error', () => {
+  const wasWaitingForAnimation = hajimiAnimationEnabled;
+  hajimiAnimationEnabled = false;
+  hajimiAnimationReady = false;
+  hajimiAnimationRequested = false;
+  dogAnimationAtlas.removeAttribute('src');
+  applyHajimiAnimationVisibility();
+  if (wasWaitingForAnimation) {
+    showToyNotice('东海帝皇动画加载失败，请稍后重试。', true);
+  }
+});
 
 async function handlePerformanceSettingClick(button) {
   if (performanceSettingsSaving) return;
@@ -842,6 +999,7 @@ function openSettings() {
   if (settingsOpen) return;
   markSettingsSeen();
   settingsOpen = true;
+  settingsOverlay.inert = false;
   settingsOverlay.classList.add('is-open');
   settingsOverlay.setAttribute('aria-hidden', 'false');
   settingsClose.focus({ preventScroll: true });
@@ -851,9 +1009,15 @@ function closeSettings() {
   if (!settingsOpen) return;
   markAllSfxNewSeen();
   settingsOpen = false;
+  settingsOverlay.inert = true;
   settingsOverlay.classList.remove('is-open');
   settingsOverlay.setAttribute('aria-hidden', 'true');
   settingsButton.focus({ preventScroll: true });
+}
+
+function handleAuthorHomeClick() {
+  if (!settingsOpen) return;
+  openCreatorSpace();
 }
 
 settingsButton.addEventListener('click', openSettings);
@@ -870,19 +1034,19 @@ window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closeSettings();
 });
 
-authorHomeButton.addEventListener('click', openCreatorSpace);
+authorHomeButton.addEventListener('click', handleAuthorHomeClick);
 videoCard.addEventListener('click', openFeaturedVideo);
 
 async function handleSfxOptionClick(option) {
   const sfxId = option.dataset.sfx;
   if (!LOCKED_SFX_IDS.has(sfxId)) {
-    selectSfxOption(option);
+    activateSfxOption(option);
     return;
   }
 
   markSfxNewSeen(sfxId);
   if (toyCloudState.sfxUnlocked) {
-    selectSfxOption(option);
+    activateSfxOption(option);
     return;
   }
 
@@ -895,7 +1059,7 @@ async function handleSfxOptionClick(option) {
     return;
   }
 
-  selectSfxOption(option);
+  activateSfxOption(option);
 }
 
 /* 三套音效都保留 da / gou / jiao 的语义位置，只替换实际播放采样。 */
@@ -952,16 +1116,21 @@ const BARK_SOURCE_MIDI = Object.freeze({
   dingdongji_ji: 69.48535473104747,
 });
 
-// 固定 A 小调五声音阶（A–C–D–E–G）。第三列 / 第三行是最接近
-// 对应原声音高的音：da / jiao / ha → C5，gou / ji → G4，mi → E4，
-// 叮咚鸡三段 → A4。
+// ha_new 的 A5 跨度较大；普通模式使用全四档复测后的 minimax 补偿锚点。
+// 钢琴模式仍使用上方实测锚点，避免影响 C4–C5 的既有校准。
+const BARK_NORMAL_SOURCE_MIDI = Object.freeze({
+  ha: 72.732,
+});
+
+// 固定 A 小调五声音阶（A–C–D–E–G）。大狗叫与叮咚鸡的第三档是最接近
+// 原声的音；哈基米移除旧最低档、将原前三档后移，因此第四档最接近原声。
 const BARK_TARGET_MIDI = Object.freeze({
   da: Object.freeze([79, 76, 72, 69]),    // G5, E5, C5, A4
   gou: Object.freeze([72, 69, 67, 64]),   // C5, A4, G4, E4
   jiao: Object.freeze([79, 76, 72, 69]),  // G5, E5, C5, A4
-  ha: Object.freeze([79, 76, 72, 69]),    // G5, E5, C5, A4
-  ji: Object.freeze([72, 69, 67, 64]),    // C5, A4, G4, E4
-  mi: Object.freeze([69, 67, 64, 62]),    // A4, G4, E4, D4
+  ha: Object.freeze([81, 79, 76, 72]),    // A5, G5, E5, C5
+  ji: Object.freeze([74, 72, 69, 67]),    // D5, C5, A4, G4
+  mi: Object.freeze([72, 69, 67, 64]),    // C5, A4, G4, E4
   dingdongji_ding: Object.freeze([74, 72, 69, 67]), // D5, C5, A4, G4
   dingdongji_dong: Object.freeze([74, 72, 69, 67]), // D5, C5, A4, G4
   dingdongji_ji: Object.freeze([74, 72, 69, 67]),   // D5, C5, A4, G4
@@ -1438,7 +1607,9 @@ function quantize(unit) {
 }
 
 function barkPlaybackRate(sample, pitchTier, fixedTargetMidi) {
-  const sourceMidi = BARK_SOURCE_MIDI[sample];
+  const sourceMidi = Number.isFinite(fixedTargetMidi)
+    ? BARK_SOURCE_MIDI[sample]
+    : (BARK_NORMAL_SOURCE_MIDI[sample] ?? BARK_SOURCE_MIDI[sample]);
   const targetMidi = Number.isFinite(fixedTargetMidi)
     ? fixedTargetMidi
     : BARK_TARGET_MIDI[sample]?.[pitchTier];
@@ -2666,11 +2837,11 @@ function tick() {
   const now = nowSec();
   const dt = Math.min(0.05, Math.max(0.001, now - lastTick));
   lastTick = now;
-  const uiBeatPosition =
-    started && ctx && startTime > 0 && ctx.currentTime >= startTime
-      ? (ctx.currentTime - startTime) / SPB
-      : null;
+  const uiBeatPosition = getAudioBeatPosition();
   updateUiRhythm(uiBeatPosition);
+  if (hajimiAnimationEnabled && hajimiAnimationReady) {
+    renderHajimiAnimationFrame(uiBeatPosition);
+  }
 
   if (started && ctx) {
     const t = ctx.currentTime;

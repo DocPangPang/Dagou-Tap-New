@@ -193,6 +193,30 @@
   #dog-inner.is-hajimi.bark-image #dog-close { visibility: hidden; }
   #dog-inner.is-hajimi.bark-image #dog-open { visibility: visible; }
 
+  /* 东海帝皇由 Web Audio 时钟驱动透明画布；图集为无损高分辨率帧，
+     画布只负责显示当前节拍对应帧，并使用独立柔和阴影避免缩放后的硬边。 */
+  #dog-inner #dog-animation {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 70%;
+    height: auto;
+    display: block;
+    opacity: 0;
+    visibility: hidden;
+    filter: drop-shadow(0 10px 20px rgba(105, 99, 93, .28));
+    transform: translate(-50%, -50%);
+    transition: none;
+  }
+  #dog-inner.is-hajimi.is-hajimi-animation #dog-close,
+  #dog-inner.is-hajimi.is-hajimi-animation #dog-open {
+    visibility: hidden;
+  }
+  #dog-inner.is-hajimi.is-hajimi-animation #dog-animation {
+    opacity: 1;
+    visibility: visible;
+  }
+
   /* 顶部控制：互动时隐藏，闲置 2 秒后由 JS 淡入 */
   #top-controls {
     position: absolute;
@@ -813,6 +837,17 @@
     --btn-fill: rgba(255, 244, 224, .96);   /* 淡黄底 + 琥珀描边，呼应控制按钮的浅色语言 */
     color: #d88f00;
   }
+  /* 哈基米成为当前音效后，再点同一按钮用于在两套形象之间切换。 */
+  .sfx-option[data-sfx="hajimi"].is-character-toggle .sfx-name {
+    font-size: 0;
+  }
+  .sfx-option[data-sfx="hajimi"].is-character-toggle .sfx-name::after {
+    content: "换成帝皇";
+    font-size: 12px;
+  }
+  .sfx-option[data-sfx="hajimi"].is-character-toggle.is-animation-active .sfx-name::after {
+    content: "换回哈基米";
+  }
   .sfx-option.is-locked {
     --btn-edge: rgba(135, 131, 126, .42);
     --btn-fill: rgba(242, 239, 233, .94);
@@ -916,9 +951,11 @@
         <div id="dog-jelly">
           <img id="dog-close" src="Image/dagou_close_mouth.png" alt="大狗" draggable="false" />
           <img id="dog-open" src="Image/dagou_open_mouth.png" alt="" draggable="false" />
+          <canvas id="dog-animation" width="360" height="514" role="img" aria-label="东海帝皇循环动画" aria-hidden="true"></canvas>
         </div>
       </div>
     </div>
+    <img id="dog-animation-atlas" alt="" hidden decoding="async" fetchpriority="low" />
 
     <div id="top-controls" class="is-visible has-update-dot" aria-label="声音与导航控制">
       <div id="audio-controls" class="control-group">
@@ -952,7 +989,7 @@
       </div>
     </div>
 
-    <div id="settings-overlay" aria-hidden="true">
+    <div id="settings-overlay" aria-hidden="true" inert>
       <div id="settings-panel" role="dialog" aria-modal="true" aria-label="设置">
         <div class="settings-scroll">
           <div class="settings-head">
@@ -1018,7 +1055,7 @@
                   <span class="sfx-lock"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="2" /><path d="M5 7V5a3 3 0 016 0v2" /></svg></span>
                 </span>
                 <span class="sfx-icon">
-                  <img src="Image/maodie_close_mouth.png" alt="" draggable="false" />
+                  <img id="hajimi-option-image" src="Image/maodie_close_mouth.png" alt="" draggable="false" />
                 </span>
                 <span class="sfx-name">哈基米</span>
               </button>
@@ -1065,6 +1102,6 @@
   </div>
 
   <script src="audio-data.js?v=20260721-hajimi-new"></script>
-  <script src="main.js?v=20260721-hajimi-new-final"></script>
+  <script src="main.js?v=20260721-hajimi-beat-synced-raised"></script>
 </body>
 </html>

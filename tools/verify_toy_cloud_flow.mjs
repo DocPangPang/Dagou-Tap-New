@@ -85,9 +85,18 @@ const functionNames = [
   'markSfxNewSeen',
   'markAllSfxNewSeen',
   'requireToyCloudContext',
+  'renderHajimiCharacterControl',
+  'getAudioBeatPosition',
+  'alignHajimiAnimationToBeat',
+  'renderHajimiAnimationFrame',
+  'applyHajimiAnimationVisibility',
+  'ensureHajimiAnimationLoaded',
+  'toggleHajimiCharacter',
   'selectSfxOption',
+  'activateSfxOption',
   'openSettings',
   'closeSettings',
+  'handleAuthorHomeClick',
   'handleSfxOptionClick',
   'handlePerformanceSettingClick',
 ];
@@ -141,6 +150,16 @@ function makeHarness(toy) {
   ];
   const dogCloseImage = new FakeElement();
   const dogOpenImage = new FakeElement();
+  const dogAnimationCanvas = new FakeElement();
+  const dogAnimationAtlas = new FakeElement();
+  const dogAnimationDraws = [];
+  const dogAnimation2d = {
+    clearRect() {},
+    drawImage(...drawArguments) {
+      dogAnimationDraws.push(drawArguments);
+    },
+  };
+  const hajimiOptionImage = new FakeElement();
   const dogInner = new FakeElement();
   const notices = [];
   const performanceButtons = [
@@ -213,7 +232,25 @@ function makeHarness(toy) {
         alt: '哈基米',
       }),
     }),
+    HAJIMI_ATLAS_URL: 'Image/donghaidihuang_atlas.webp?v=20260721-beat-synced',
+    HAJIMI_STATIC_ICON_URL: 'Image/maodie_close_mouth.png',
+    HAJIMI_ANIMATION_ICON_URL: 'Image/donghaidihuang_icon.webp',
+    HAJIMI_ANIMATION_BEATS: 9,
+    HAJIMI_FRAMES_PER_BEAT: 12,
+    HAJIMI_ATLAS_COLUMNS: 12,
+    HAJIMI_ATLAS_FRAME_WIDTH: 360,
+    HAJIMI_ATLAS_FRAME_HEIGHT: 514,
+    HAJIMI_ANIMATION_FRAME_COUNT: 108,
     selectedSfxId: 'dagou',
+    hajimiAnimationEnabled: false,
+    hajimiAnimationReady: false,
+    hajimiAnimationRequested: false,
+    hajimiAnimationFrame: -1,
+    hajimiAnimationEpochBeat: 0,
+    SPB: 60 / 128,
+    started: false,
+    ctx: null,
+    startTime: 0,
     // Keep the baseline cases validating the normal release/cloud-lock flow.
     // The dedicated debug case below opts into the temporary bypass explicitly.
     DEBUG_UNLOCK_SFX: false,
@@ -242,8 +279,12 @@ function makeHarness(toy) {
     FEATURED_BVID: 'BV1kNKU6REBg',
     FEATURED_VIDEO_URL: 'https://www.bilibili.com/video/BV1kNKU6REBg/',
     sfxOptions: options,
+    hajimiOptionImage,
     dogCloseImage,
     dogOpenImage,
+    dogAnimationCanvas,
+    dogAnimationAtlas,
+    dogAnimation2d,
     dogInner,
     topControls: new FakeElement(),
     updateDot: new FakeElement(),
@@ -253,6 +294,7 @@ function makeHarness(toy) {
     settingsButton: new FakeElement(),
     settingsClose: new FakeElement(),
     settingsOpen: false,
+    openCreatorSpace() {},
     videoUnlockPending: false,
     toyNoticeTimer: 0,
     toyCloudState: {
@@ -283,6 +325,10 @@ function makeHarness(toy) {
     options,
     dogCloseImage,
     dogOpenImage,
+    dogAnimationCanvas,
+    dogAnimationAtlas,
+    dogAnimationDraws,
+    hajimiOptionImage,
     dogInner,
     performanceButtons,
     notices,
@@ -320,8 +366,45 @@ for (const key of [
 }
 assert.match(
   mainSource,
-  /const DEBUG_UNLOCK_SFX = true;/,
-  'temporary debug unlock must remain explicit and easy to disable'
+  /const DEBUG_UNLOCK_SFX = (?:true|false);/,
+  'temporary SFX unlock bypass must remain an explicit boolean'
+);
+
+const hajimiAtlasPath = new URL(
+  '../Image/donghaidihuang_atlas.webp',
+  import.meta.url,
+);
+assert.ok(fs.existsSync(hajimiAtlasPath), 'missing lossless Hajimi frame atlas');
+assert.ok(
+  fs.statSync(hajimiAtlasPath).size < 7 * 1024 * 1024,
+  'lossless Hajimi frame atlas must stay below 7 MiB'
+);
+const hajimiAtlasBytes = fs.readFileSync(hajimiAtlasPath);
+let webpOffset = 12;
+let atlasWidth = null;
+let atlasHeight = null;
+let hasAnimationChunk = false;
+while (webpOffset + 8 <= hajimiAtlasBytes.length) {
+  const chunkName = hajimiAtlasBytes.toString(
+    'ascii',
+    webpOffset,
+    webpOffset + 4,
+  );
+  const chunkSize = hajimiAtlasBytes.readUInt32LE(webpOffset + 4);
+  const chunkData = webpOffset + 8;
+  if (chunkName === 'VP8X' && chunkSize >= 10) {
+    atlasWidth = hajimiAtlasBytes.readUIntLE(chunkData + 4, 3) + 1;
+    atlasHeight = hajimiAtlasBytes.readUIntLE(chunkData + 7, 3) + 1;
+  }
+  if (chunkName === 'ANIM' || chunkName === 'ANMF') hasAnimationChunk = true;
+  webpOffset = chunkData + chunkSize + (chunkSize % 2);
+}
+assert.equal(atlasWidth, 4320, 'Hajimi atlas must contain 12 frame columns');
+assert.equal(atlasHeight, 4626, 'Hajimi atlas must contain 9 frame rows');
+assert.equal(hasAnimationChunk, false, 'atlas timing must be controlled by Web Audio');
+assert.ok(
+  fs.existsSync(new URL('../Image/donghaidihuang_icon.webp', import.meta.url)),
+  'missing Hajimi animation button icon',
 );
 
 for (const id of ['dingdong', 'hajimi']) {
@@ -366,6 +449,23 @@ assert.match(
   /#dog-inner\.is-hajimi\.bark-image #dog-open\s*{\s*visibility:\s*visible;\s*}/,
   'only Hajimi must reveal its open-mouth image while barking'
 );
+assert.match(
+  htmlSource,
+  /#dog-inner\.is-hajimi\.is-hajimi-animation #dog-close,[\s\S]*?#dog-inner\.is-hajimi\.is-hajimi-animation #dog-open\s*{\s*visibility:\s*hidden;\s*}/,
+  'the looping character must suppress both Hajimi mouth images'
+);
+assert.match(
+  htmlSource,
+  /id="dog-animation"[^>]*width="360"[^>]*height="514"[^>]*aria-hidden="true"/,
+  'the looping character must render through the fixed-size frame canvas'
+);
+assert.match(
+  htmlSource,
+  /id="dog-animation-atlas"[^>]*hidden[^>]*decoding="async"[^>]*fetchpriority="low"/,
+  'the lossless atlas must be a lazy low-priority image'
+);
+assert.match(htmlSource, /content:\s*"换成帝皇"/, 'static Hajimi toggle label');
+assert.match(htmlSource, /content:\s*"换回哈基米"/, 'animated Hajimi toggle label');
 for (const [settingName, defaultChecked] of [
   ['pianoMode', 'false'],
   ['rhythmSnap', 'true'],
@@ -457,6 +557,58 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.dogCloseImage.alt, '哈基米');
   assert.equal(harness.dogOpenImage.src, 'Image/maodie_open_mouth.png');
   assert.equal(harness.dogInner.classList.contains('is-hajimi'), true);
+  assert.equal(
+    option(harness, 'hajimi').classList.contains('is-character-toggle'),
+    true
+  );
+  assert.equal(
+    harness.dogAnimationAtlas.src,
+    'Image/donghaidihuang_atlas.webp?v=20260721-beat-synced'
+  );
+  assert.equal(harness.hajimiOptionImage.src, 'Image/maodie_close_mouth.png');
+  assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), false);
+  assert.equal(option(harness, 'hajimi').classList.contains('is-animation-active'), false);
+
+  // The first selection preloads the asset. A second click switches the visual,
+  // and a third click returns to the original Hajimi image pair.
+  harness.context.hajimiAnimationReady = true;
+  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), true);
+  assert.equal(harness.dogCloseImage.alt, '');
+  assert.equal(harness.dogAnimationCanvas.attributes.get('aria-hidden'), 'false');
+  assert.equal(harness.hajimiOptionImage.src, 'Image/donghaidihuang_icon.webp');
+  assert.equal(option(harness, 'hajimi').classList.contains('is-animation-active'), true);
+
+  harness.context.hajimiAnimationFrame = -1;
+  harness.dogAnimationDraws.length = 0;
+  for (const beatPosition of [0, 1, 8.999, 9]) {
+    harness.context.renderHajimiAnimationFrame(beatPosition);
+  }
+  assert.deepEqual(
+    harness.dogAnimationDraws.map((draw) => draw.slice(1, 3)),
+    [[0, 0], [0, 514], [3960, 4112], [0, 0]],
+    'frame 0 must land on the accent and return exactly every nine beats',
+  );
+
+  harness.context.started = true;
+  harness.context.startTime = 1;
+  harness.context.ctx = { currentTime: 1 + 3.4 * (60 / 128) };
+  harness.context.alignHajimiAnimationToBeat();
+  assert.equal(
+    harness.context.hajimiAnimationEpochBeat,
+    4,
+    'switching mid-beat must align frame 0 to the next beat head',
+  );
+  harness.context.started = false;
+  harness.context.ctx = null;
+
+  await harness.context.handleSfxOptionClick(option(harness, 'hajimi'));
+  assert.equal(harness.dogInner.classList.contains('is-hajimi-animation'), false);
+  assert.equal(harness.dogAnimationCanvas.attributes.get('aria-hidden'), 'true');
+  assert.equal(harness.dogCloseImage.alt, '哈基米');
+  assert.equal(harness.hajimiOptionImage.src, 'Image/maodie_close_mouth.png');
+  assert.equal(option(harness, 'hajimi').classList.contains('is-animation-active'), false);
+
   harness.context.selectSfxOption(option(harness, 'dingdong'));
   assert.equal(harness.dogCloseImage.src, 'Image/dingdongji_close_mouth.png');
   assert.equal(harness.dogCloseImage.alt, '叮咚鸡');
@@ -586,6 +738,42 @@ for (const [settingName, defaultChecked] of [
   const setup = makeToy();
   const harness = makeHarness(setup.toy);
   await initialize(harness);
+  let creatorNavigationCount = 0;
+  harness.context.openCreatorSpace = () => {
+    creatorNavigationCount++;
+  };
+
+  harness.context.handleAuthorHomeClick();
+  assert.equal(
+    creatorNavigationCount,
+    0,
+    'the hidden author home button must not navigate while settings are closed'
+  );
+
+  harness.context.openSettings();
+  assert.equal(harness.context.settingsOverlay.inert, false);
+  harness.context.handleAuthorHomeClick();
+  assert.equal(creatorNavigationCount, 1);
+  harness.context.closeSettings();
+  assert.equal(harness.context.settingsOverlay.inert, true);
+  harness.context.handleAuthorHomeClick();
+  assert.equal(
+    creatorNavigationCount,
+    1,
+    'closing settings must disable subsequent author home clicks'
+  );
+}
+
+assert.match(
+  htmlSource,
+  /id="settings-overlay"[^>]*\binert\b/,
+  'the settings dialog must start inert before JavaScript runs'
+);
+
+{
+  const setup = makeToy();
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
   harness.context.markSettingsSeen();
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), true);
   assert.equal(harness.context.topControls.classList.contains('has-update-dot'), false);
@@ -614,3 +802,5 @@ console.log('- settings red dot and per-option NEW states persist independently'
 console.log('- a visible red dot pins only the settings button while audio controls hide');
 console.log('- the temporary debug switch unlocks both options without Toy capabilities');
 console.log('- performance defaults, cloud restore/write, and local-only fallback switching');
+console.log('- active Hajimi button toggles the lazy-loaded looping character');
+console.log('- Web Audio clock returns the lossless atlas to frame 0 every nine beats');

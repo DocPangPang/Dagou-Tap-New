@@ -67,6 +67,10 @@ const declarations = [
     'BARK_SOURCE_MIDI',
   ),
   extractDeclaration(
+    /const BARK_NORMAL_SOURCE_MIDI = Object\.freeze\(\{[\s\S]*?\n\}\);/,
+    'BARK_NORMAL_SOURCE_MIDI',
+  ),
+  extractDeclaration(
     /const BARK_TARGET_MIDI = Object\.freeze\(\{[\s\S]*?\n\}\);/,
     'BARK_TARGET_MIDI',
   ),
@@ -104,6 +108,7 @@ vm.runInNewContext(
     barkPlaybackRate,
     sustainRegions: SUSTAIN_REGIONS,
     sourceMidi: BARK_SOURCE_MIDI,
+    normalSourceMidi: BARK_NORMAL_SOURCE_MIDI,
     targetMidi: BARK_TARGET_MIDI,
     pianoScale: PIANO_SCALE,
     sampleGain: SFX_SAMPLE_GAIN,
@@ -212,6 +217,11 @@ for (const mapping of report.mappings) {
 }
 
 const minorPentatonicPitchClasses = new Set([9, 0, 2, 4, 7]);
+const expectedRaisedHajimiTargets = {
+  ha: [81, 79, 76, 72],
+  ji: [74, 72, 69, 67],
+  mi: [72, 69, 67, 64],
+};
 for (const sample of sampleNames) {
   const rows = report.mappings
     .filter(item => item.sample === sample)
@@ -236,10 +246,23 @@ for (const sample of sampleNames) {
   const nearest = candidates.reduce((best, midi) =>
     Math.abs(midi - sourceMidi) < Math.abs(best - sourceMidi) ? midi : best
   );
-  if (rows[2].target_midi !== nearest) {
+  const nearestTier = report.method.nearest_minor_tier_index_by_sample?.[sample];
+  if (!Number.isInteger(nearestTier) || rows[nearestTier].target_midi !== nearest) {
     throw new Error(
-      `${sample}: tier 3 is ${rows[2].target_midi}, nearest minor note is ${nearest}`,
+      `${sample}: tier ${nearestTier + 1} is ` +
+      `${rows[nearestTier]?.target_midi}, nearest minor note is ${nearest}`,
     );
+  }
+
+  if (expectedRaisedHajimiTargets[sample]) {
+    const actualTargets = rows.map(row => row.target_midi);
+    if (
+      actualTargets.some(
+        (target, index) => target !== expectedRaisedHajimiTargets[sample][index],
+      )
+    ) {
+      throw new Error(`${sample}: raised Hajimi target sequence is incorrect`);
+    }
   }
 }
 
@@ -252,9 +275,6 @@ for (let row = 0; row < 3; row++) {
   if (rowZones.some((zone, column) => zone.pitchTier !== column)) {
     throw new Error(`Landscape row ${row}: pitch tiers do not run 0,1,2,3`);
   }
-  if (rowZones[2].pitchTier !== 2) {
-    throw new Error(`Landscape row ${row}: nearest-minor key is not in column 3`);
-  }
 }
 
 const portrait = mappingApi.buildLayout(800, 1200);
@@ -266,9 +286,6 @@ for (let row = 0; row < 4; row++) {
   if (rowZones.some(zone => zone.pitchTier !== row)) {
     throw new Error(`Portrait row ${row}: pitch tier does not match row`);
   }
-}
-if (portrait.zones.slice(6, 9).some(zone => zone.pitchTier !== 2)) {
-  throw new Error('Portrait nearest-minor keys are not in row 3');
 }
 
 const pianoMidi = [60, 62, 64, 65, 67, 69, 71, 72];
@@ -364,7 +381,8 @@ console.log(
   `${analysedMiSustain.rms_span_db.toFixed(3)} dB level span`,
 );
 console.log('Repeated-key pitch stability verified: no chord/time-dependent switching');
-console.log('Layout verified: column 3 / row 3 use the nearest minor-pentatonic note');
+console.log('Layout verified: all four fixed pitch tiers retain their screen order');
+console.log('Raised Hajimi verified: lowest tier removed and new high tier added');
 console.log('Piano layout verified: 8 × 3 C4–C5 scale and reversed 3 × 8 portrait scale');
 console.log(
   `Worst remeasured transposed error: ` +

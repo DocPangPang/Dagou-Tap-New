@@ -54,15 +54,25 @@ FIXED_TARGET_MIDI = {
     "da": (79, 76, 72, 69),    # G5, E5, C5, A4
     "gou": (72, 69, 67, 64),   # C5, A4, G4, E4
     "jiao": (79, 76, 72, 69),  # G5, E5, C5, A4
-    "ha": (79, 76, 72, 69),    # G5, E5, C5, A4
-    "ji": (72, 69, 67, 64),    # C5, A4, G4, E4
-    "mi": (69, 67, 64, 62),    # A4, G4, E4, D4
+    "ha": (81, 79, 76, 72),    # A5, G5, E5, C5
+    "ji": (74, 72, 69, 67),    # D5, C5, A4, G4
+    "mi": (72, 69, 67, 64),    # C5, A4, G4, E4
     "dingdongji_ding": (74, 72, 69, 67),  # D5, C5, A4, G4
     "dingdongji_dong": (74, 72, 69, 67),  # D5, C5, A4, G4
     "dingdongji_ji": (74, 72, 69, 67),    # D5, C5, A4, G4
 }
 PIANO_TARGET_MIDI = (60, 62, 64, 65, 67, 69, 71, 72)
-TIER_NAMES = ("pitch_1", "pitch_2", "nearest_minor", "pitch_4")
+TIER_NAMES = ("pitch_1", "pitch_2", "pitch_3", "pitch_4")
+NEAREST_TIER_INDEX = {
+    sample_name: 3 if SAMPLE_TO_SFX[sample_name] == "hajimi" else 2
+    for sample_name in SAMPLE_NAMES
+}
+NORMAL_PLAYBACK_REFERENCE_MIDI = {
+    # Minimax fit across the raised A5 / G5 / E5 / C5 keys. The measured
+    # anchor remains in the report; this reference compensates nonlinear YIN
+    # drift after the largest upward resampling ratios.
+    "ha": 72.732,
+}
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 LOUDNESS_REFERENCE_SAMPLE = "da"
 LOUDNESS_FRAME_SECONDS = 0.020
@@ -463,9 +473,10 @@ def run(args: argparse.Namespace) -> int:
             if target_midi % 12 not in MINOR_PENTATONIC_PITCH_CLASSES:
                 raise ValueError(f"{sample_name}/{tier_name} is outside A minor pentatonic")
 
-            rate = 2.0 ** (
-                (target_midi - source_analysis.anchor_midi) / 12.0
+            playback_reference_midi = NORMAL_PLAYBACK_REFERENCE_MIDI.get(
+                sample_name, source_analysis.anchor_midi
             )
+            rate = 2.0 ** ((target_midi - playback_reference_midi) / 12.0)
             rendered = playback_rate_resample(samples, rate)
             rendered_analysis = analyze_pitch(rendered, sample_rate)
             target_note = note_label(float(target_midi))[0]
@@ -498,6 +509,7 @@ def run(args: argparse.Namespace) -> int:
                     "tier": tier_name,
                     "source_anchor_hz": source_analysis.anchor_hz,
                     "source_anchor_midi": source_analysis.anchor_midi,
+                    "playback_reference_midi": playback_reference_midi,
                     "target_note": target_note,
                     "target_hz": target_hz,
                     "target_midi": target_midi,
@@ -580,7 +592,10 @@ def run(args: argparse.Namespace) -> int:
             "scale": "A minor pentatonic: A, C, D, E, G",
             "piano_scale": "C major white keys: C4, D4, E4, F4, G4, A4, B4, C5",
             "tier_rule": "fixed target MIDI per sample and screen key",
-            "nearest_minor_tier_index": 2,
+            "nearest_minor_tier_index_by_sample": NEAREST_TIER_INDEX,
+            "normal_playback_reference_overrides": (
+                NORMAL_PLAYBACK_REFERENCE_MIDI
+            ),
             "loudness": (
                 "20 ms gated active RMS; fixed per-sample gain referenced to da.wav"
             ),
