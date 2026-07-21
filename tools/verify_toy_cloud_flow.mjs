@@ -84,6 +84,7 @@ const functionNames = [
   'markSettingsSeen',
   'markSfxNewSeen',
   'markAllSfxNewSeen',
+  'requireToyCloudContext',
   'openUnlockConfirm',
   'closeUnlockConfirm',
   'setUnlockConfirmPending',
@@ -675,15 +676,16 @@ for (const [settingName, defaultChecked] of [
   await initialize(harness);
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), false);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), true);
-  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
-  assert.equal(harness.context.unlockConfirmOpen, true);
-  assert.equal(harness.notices.length, 0);
-  await harness.context.confirmUnlockFromVideo();
+  assert.equal(await harness.context.requireToyCloudContext(), null);
+  assert.equal(
+    harness.notices.at(-1).message,
+    '请在B站打开此页面，跳转开发视频观看后解锁'
+  );
+  await harness.context.openFeaturedVideo();
   assert.deepEqual(harness.externalNavigationLog, [
     'https://www.bilibili.com/video/BV1kNKU6REBg/',
   ]);
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
-  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
     { pianoMode: false, rhythmSnap: true, showGrid: false },
@@ -701,8 +703,11 @@ for (const [settingName, defaultChecked] of [
   const harness = makeHarness(setup.toy);
   await initialize(harness);
   await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
-  assert.equal(harness.context.unlockConfirmOpen, true);
-  assert.equal(harness.notices.length, 0);
+  assert.equal(harness.context.unlockConfirmOpen, false);
+  assert.equal(
+    harness.notices.at(-1).message,
+    '请在B站打开此页面，跳转开发视频观看后解锁'
+  );
 }
 
 {
@@ -731,9 +736,10 @@ for (const [settingName, defaultChecked] of [
   );
   await harness.context.handleSkinOptionClick(harness.hajimiSkinEmperor);
   assert.equal(harness.context.hajimiAnimationEnabled, false);
-  assert.equal(harness.context.unlockConfirmOpen, true);
-  assert.equal(harness.unlockConfirmTitle.textContent, '解锁哈基米（帝皇）');
-  assert.equal(harness.notices.length, 0);
+  assert.equal(
+    harness.notices.at(-1).message,
+    '请在B站打开此页面，跳转开发视频观看后解锁'
+  );
 }
 
 {
@@ -850,13 +856,12 @@ for (const [settingName, defaultChecked] of [
     harness.hajimiSkinEmperor.classList.contains('is-locked'),
     true
   );
+  assert.equal(await harness.context.requireToyCloudContext(), null);
+  assert.match(harness.notices.at(-1).message, /云端状态读取失败/);
   setup.log.length = 0;
-  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
-  assert.equal(harness.context.unlockConfirmOpen, true);
-  await harness.context.confirmUnlockFromVideo();
+  await harness.context.openFeaturedVideo();
   assert.deepEqual(setup.log, ['navigate:video:BV1kNKU6REBg']);
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
-  assert.match(harness.notices.at(-1).message, /临时解锁/);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
     { pianoMode: false, rhythmSnap: true, showGrid: false },
@@ -1000,7 +1005,7 @@ for (const [settingName, defaultChecked] of [
   await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
   await harness.context.confirmUnlockFromVideo();
 
-  assert.equal(setup.log.includes('navigate:video:BV1kNKU6REBg'), true);
+  assert.equal(setup.log.includes('navigate:video:BV1kNKU6REBg'), false);
   assert.equal(
     harness.context.toyCloudState.sfxUnlocked,
     true,
@@ -1008,7 +1013,7 @@ for (const [settingName, defaultChecked] of [
   );
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
   assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
-  assert.match(harness.notices.at(-1).message, /临时解锁/);
+  assert.match(harness.notices.at(-1).message, /解锁失败/);
 }
 
 {
@@ -1035,12 +1040,9 @@ for (const [settingName, defaultChecked] of [
   await initialize(harness);
   setup.log.length = 0;
   await harness.context.openFeaturedVideo();
-  assert.deepEqual(setup.log, [
-    'set:dagou_sfx_unlocked_v1',
-    'navigate:video:BV1kNKU6REBg',
-  ]);
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
-  assert.match(harness.notices.at(-1).message, /临时解锁/);
+  assert.equal(setup.log.includes('navigate:video:BV1kNKU6REBg'), false);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
+  assert.match(harness.notices.at(-1).message, /解锁失败/);
 }
 
 {
@@ -1141,12 +1143,12 @@ console.log('- the Hajimi sound card never shows a lock; the lock lives on the e
 console.log('- only Dingdong and the dedicated emperor skin chip start locked');
 console.log('- the settings hint arrow appears and disappears together with the red dot');
 console.log('- unavailable cloud reads keep the red dot and premium items locked');
-console.log('- locked items open the same centered confirmation inside and outside Toy');
+console.log('- signed-in Toy users get a centered unlock confirmation');
 console.log('- confirmed unlocks update locally, persist to cloud, then wait 0.5s before navigation');
-console.log('- missing cloud access falls back to a current-page-only temporary unlock');
+console.log('- failed confirmed writes keep the current page temporarily unlocked without navigating');
 console.log('- cloud unlock is written before Toy video navigation');
-console.log('- videos still open outside Toy or without readable cloud state after temporary unlock');
-console.log('- failed cloud writes still navigate; failed navigation keeps the unlock');
+console.log('- videos still open outside Toy or without readable cloud state, without unlocking');
+console.log('- failed writes never navigate; failed navigation keeps the unlock');
 console.log('- settings red dot and per-option NEW states persist independently');
 console.log('- a visible red dot pins only the settings button while audio controls hide');
 console.log('- the temporary debug switch unlocks both premium items without Toy capabilities');
