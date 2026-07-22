@@ -71,6 +71,9 @@ class FakeElement {
 const functionNames = [
   'openFeaturedVideo',
   'showToyNotice',
+  'normalizePianoOctaveStart',
+  'effectivePianoOctaveStart',
+  'octaveControlsEnabled',
   'applyPerformanceSettings',
   'replacePerformanceSettings',
   'resetPerformanceSettingsToDefaults',
@@ -103,6 +106,9 @@ const functionNames = [
   'handleAuthorHomeClick',
   'handleSfxOptionClick',
   'handlePerformanceSettingClick',
+  'flushPianoOctaveCloudWrite',
+  'queuePianoOctaveCloudWrite',
+  'shiftPianoOctave',
 ];
 const extractedFunctions = functionNames.map(extractFunction).join('\n');
 
@@ -112,6 +118,7 @@ function makeToy({
   profile = { nickname: '测试用户', avatar: 'https://example.com/avatar.png' },
   getError = null,
   setError = null,
+  setHandler = null,
   navigateError = null,
 } = {}) {
   const log = [];
@@ -136,6 +143,7 @@ function makeToy({
       const keys = Object.keys(items).sort().join(',');
       log.push(`set:${keys}`);
       if (setError) throw setError;
+      if (setHandler) await setHandler(items);
       Object.assign(storage, items);
     },
     async navigate(request) {
@@ -188,6 +196,7 @@ function makeHarness(toy) {
   const notices = [];
   const performanceButtons = [
     new FakeElement({ dataset: { setting: 'pianoMode' } }),
+    new FakeElement({ dataset: { setting: 'octaveSwitching' } }),
     new FakeElement({ dataset: { setting: 'rhythmSnap' } }),
     new FakeElement({ dataset: { setting: 'showGrid' } }),
   ];
@@ -219,6 +228,8 @@ function makeHarness(toy) {
       dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
       hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
       pianoMode: 'dagou_piano_mode_v1',
+      octaveSwitching: 'dagou_octave_switching_v1',
+      pianoOctaveStart: 'dagou_piano_octave_start_v1',
       rhythmSnap: 'dagou_rhythm_snap_v1',
       showGrid: 'dagou_show_grid_v1',
     },
@@ -228,6 +239,8 @@ function makeHarness(toy) {
       'dagou_dingdong_new_seen_v1',
       'dagou_hajimi_new_seen_v1',
       'dagou_piano_mode_v1',
+      'dagou_octave_switching_v1',
+      'dagou_piano_octave_start_v1',
       'dagou_rhythm_snap_v1',
       'dagou_show_grid_v1',
     ],
@@ -287,27 +300,40 @@ function makeHarness(toy) {
     // Keep the baseline cases validating the normal release/cloud-lock flow.
     // The dedicated debug case below opts into the temporary bypass explicitly.
     DEBUG_UNLOCK_SFX: false,
+    PIANO_OCTAVE_MIN: 3,
+    PIANO_OCTAVE_MAX: 6,
+    PIANO_DEFAULT_OCTAVE_START: 4,
     DEFAULT_PERFORMANCE_SETTINGS: Object.freeze({
       pianoMode: false,
+      octaveSwitching: false,
+      pianoOctaveStart: 4,
       rhythmSnap: true,
       showGrid: false,
     }),
     PERFORMANCE_SETTING_KEYS: Object.freeze({
       pianoMode: 'dagou_piano_mode_v1',
+      octaveSwitching: 'dagou_octave_switching_v1',
       rhythmSnap: 'dagou_rhythm_snap_v1',
       showGrid: 'dagou_show_grid_v1',
     }),
     performanceSettings: {
       pianoMode: false,
+      octaveSwitching: false,
+      pianoOctaveStart: 4,
       rhythmSnap: true,
       showGrid: false,
     },
     performanceSettingsSaving: false,
+    pendingPianoOctaveCloudValue: null,
+    pianoOctaveCloudWriteRunning: false,
     performanceSettingButtons: performanceButtons,
+    octaveSwitchingSetting: new FakeElement(),
     performanceSettingsStatus: new FakeElement(),
     zones: [{}],
     clearQueuedPerformanceInput() {},
+    settleActivePerformanceInput() {},
     renderKeyGrid() {},
+    renderOctaveControls() {},
     buildGrid() {},
     FEATURED_BVID: 'BV1kNKU6REBg',
     FEATURED_VIDEO_URL: 'https://www.bilibili.com/video/BV1kNKU6REBg/',
@@ -602,6 +628,7 @@ assert.match(
 );
 for (const [settingName, defaultChecked] of [
   ['pianoMode', 'false'],
+  ['octaveSwitching', 'false'],
   ['rhythmSnap', 'true'],
   ['showGrid', 'false'],
 ]) {
@@ -633,8 +660,15 @@ for (const [settingName, defaultChecked] of [
   assert.equal(option(harness, 'dagou').classList.contains('is-locked'), false);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
-    { pianoMode: false, rhythmSnap: true, showGrid: false },
+    {
+      pianoMode: false,
+      octaveSwitching: false,
+      pianoOctaveStart: 4,
+      rhythmSnap: true,
+      showGrid: false,
+    },
   );
+  assert.equal(harness.context.octaveSwitchingSetting.hidden, true);
   assert.equal(harness.performanceButtons.every(button => !button.disabled), true);
 }
 
@@ -646,6 +680,8 @@ for (const [settingName, defaultChecked] of [
       dagou_dingdong_new_seen_v1: '1',
       dagou_hajimi_new_seen_v1: '1',
       dagou_piano_mode_v1: '1',
+      dagou_octave_switching_v1: '1',
+      dagou_piano_octave_start_v1: '6',
       dagou_rhythm_snap_v1: '0',
       dagou_show_grid_v1: '1',
     },
@@ -667,7 +703,36 @@ for (const [settingName, defaultChecked] of [
   );
   assert.deepEqual(
     { ...harness.context.performanceSettings },
-    { pianoMode: true, rhythmSnap: false, showGrid: true },
+    {
+      pianoMode: true,
+      octaveSwitching: true,
+      pianoOctaveStart: 6,
+      rhythmSnap: false,
+      showGrid: true,
+    },
+  );
+  assert.equal(harness.context.octaveSwitchingSetting.hidden, false);
+}
+
+{
+  const setup = makeToy({
+    cloud: {
+      dagou_piano_mode_v1: '1',
+      dagou_octave_switching_v1: '1',
+      dagou_piano_octave_start_v1: '9',
+    },
+  });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  assert.equal(
+    harness.context.performanceSettings.pianoOctaveStart,
+    4,
+    'invalid cloud octave values must fall back to C4',
+  );
+  assert.equal(
+    harness.context.performanceSettings.octaveSwitching,
+    false,
+    'invalid cloud octave values must also disable octave switching',
   );
 }
 
@@ -679,7 +744,7 @@ for (const [settingName, defaultChecked] of [
   assert.equal(await harness.context.requireToyCloudContext(), null);
   assert.equal(
     harness.notices.at(-1).message,
-    '请在B站打开此页面，跳转开发视频观看后解锁'
+    '请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁'
   );
   await harness.context.openFeaturedVideo();
   assert.deepEqual(harness.externalNavigationLog, [
@@ -688,7 +753,13 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
-    { pianoMode: false, rhythmSnap: true, showGrid: false },
+    {
+      pianoMode: false,
+      octaveSwitching: false,
+      pianoOctaveStart: 4,
+      rhythmSnap: true,
+      showGrid: false,
+    },
   );
   assert.equal(harness.performanceButtons.every(button => !button.disabled), true);
   await harness.context.handlePerformanceSettingClick(
@@ -706,7 +777,7 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.unlockConfirmOpen, false);
   assert.equal(
     harness.notices.at(-1).message,
-    '请在B站打开此页面，跳转开发视频观看后解锁'
+    '请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁'
   );
 }
 
@@ -738,7 +809,7 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.hajimiAnimationEnabled, false);
   assert.equal(
     harness.notices.at(-1).message,
-    '请在B站打开此页面，跳转开发视频观看后解锁'
+    '请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁'
   );
 }
 
@@ -864,7 +935,13 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
-    { pianoMode: false, rhythmSnap: true, showGrid: false },
+    {
+      pianoMode: false,
+      octaveSwitching: false,
+      pianoOctaveStart: 4,
+      rhythmSnap: true,
+      showGrid: false,
+    },
   );
   assert.equal(harness.performanceButtons.every(button => !button.disabled), true);
 }
@@ -887,6 +964,39 @@ for (const [settingName, defaultChecked] of [
 }
 
 {
+  let releaseFirstWrite;
+  let writeCount = 0;
+  const firstWriteGate = new Promise(resolve => { releaseFirstWrite = resolve; });
+  const setup = makeToy({
+    cloud: {
+      dagou_piano_mode_v1: '1',
+      dagou_octave_switching_v1: '1',
+      dagou_piano_octave_start_v1: '4',
+    },
+    setHandler: async () => {
+      writeCount++;
+      if (writeCount === 1) await firstWriteGate;
+    },
+  });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  setup.log.length = 0;
+  harness.context.shiftPianoOctave(1);
+  harness.context.shiftPianoOctave(1);
+  assert.equal(harness.context.performanceSettings.pianoOctaveStart, 6);
+  releaseFirstWrite();
+  while (harness.context.pianoOctaveCloudWriteRunning) {
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  assert.deepEqual(setup.log, ['set:dagou_piano_octave_start_v1']);
+  assert.equal(
+    setup.storage.dagou_piano_octave_start_v1,
+    '6',
+    'serialized octave writes must finish with the latest selected value',
+  );
+}
+
+{
   const setup = makeToy({
     cloud: {
       dagou_piano_mode_v1: '1',
@@ -902,7 +1012,13 @@ for (const [settingName, defaultChecked] of [
   );
   assert.deepEqual(
     { ...harness.context.performanceSettings },
-    { pianoMode: true, rhythmSnap: false, showGrid: false },
+    {
+      pianoMode: true,
+      octaveSwitching: false,
+      pianoOctaveStart: 4,
+      rhythmSnap: false,
+      showGrid: false,
+    },
   );
   assert.equal(harness.context.toyCloudState.cloudReadable, false);
   assert.equal(harness.performanceButtons.every(button => !button.disabled), true);

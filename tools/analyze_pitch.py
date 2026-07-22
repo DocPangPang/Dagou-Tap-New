@@ -6,7 +6,7 @@ tools/tmp so the complete tools directory can be excluded from web packages.
 
 The detector uses a frame-wise YIN estimate and rejects low-energy or
 low-confidence frames. Normal screen keys use fixed A-minor-pentatonic targets;
-piano mode uses the C4-C5 white-key octave. Candidate playbackRate values are
+piano mode uses selectable C3-C7 white-key octaves. Candidate playbackRate values are
 then applied by resampling the source samples, after which the rendered result
 is measured again instead of relying only on the frequency-ratio formula.
 
@@ -61,7 +61,17 @@ FIXED_TARGET_MIDI = {
     "dingdongji_dong": (74, 72, 69, 67),  # D5, C5, A4, G4
     "dingdongji_ji": (74, 72, 69, 67),    # D5, C5, A4, G4
 }
-PIANO_TARGET_MIDI = (60, 62, 64, 65, 67, 69, 71, 72)
+PIANO_OCTAVE_STARTS = (3, 4, 5, 6)
+PIANO_SCALE_INTERVALS = (0, 2, 4, 5, 7, 9, 11, 12)
+PIANO_PLAYBACK_REFERENCE_MIDI: dict[tuple[str, int], float] = {
+    ("mi", 5): 65.60141325112846,
+    ("mi", 6): 65.17172575112846,
+    ("dingdongji_ding", 3): 68.49322934072657,
+    ("dingdongji_ding", 6): 68.86822934072657,
+    ("dingdongji_ji", 6): 69.64941723104747,
+}
+KNOWN_DIRECT_PITCH_EXCEPTIONS = frozenset({("mi", 6), ("dingdongji_ji", 6)})
+KNOWN_DIRECT_LOUDNESS_EXCEPTIONS = frozenset({("gou", 6)})
 TIER_NAMES = ("pitch_1", "pitch_2", "pitch_3", "pitch_4")
 NEAREST_TIER_INDEX = {
     sample_name: 3 if SAMPLE_TO_SFX[sample_name] == "hajimi" else 2
@@ -288,6 +298,7 @@ def yin_track(
             denominator = left - 2.0 * center + right
             if abs(denominator) > 1e-12:
                 refined_lag += float(0.5 * (left - right) / denominator)
+        refined_lag = min(float(maximum_lag), max(float(minimum_lag), refined_lag))
 
         frequency_hz = sample_rate / refined_lag
         frames.append(
@@ -303,8 +314,10 @@ def yin_track(
     return frames
 
 
-def analyze_pitch(samples: np.ndarray, sample_rate: int) -> PitchAnalysis:
-    frames = yin_track(samples, sample_rate)
+def summarise_pitch_frames(
+    frames: list[PitchFrame],
+    minimum_confidence: float = 0.72,
+) -> PitchAnalysis:
     if not frames:
         raise ValueError("No analysis frames produced")
 
@@ -312,7 +325,7 @@ def analyze_pitch(samples: np.ndarray, sample_rate: int) -> PitchAnalysis:
     voiced = [
         frame
         for frame in frames
-        if frame.rms >= peak_rms * 0.18 and frame.confidence >= 0.72
+        if frame.rms >= peak_rms * 0.18 and frame.confidence >= minimum_confidence
     ]
     if not voiced:
         raise ValueError("No sufficiently voiced frames found")
@@ -346,6 +359,44 @@ def analyze_pitch(samples: np.ndarray, sample_rate: int) -> PitchAnalysis:
         total_frame_count=len(frames),
         frames=voiced,
     )
+
+
+def analyze_pitch(samples: np.ndarray, sample_rate: int) -> PitchAnalysis:
+    return summarise_pitch_frames(yin_track(samples, sample_rate))
+
+
+def analyze_transposed_pitch(
+    samples: np.ndarray,
+    sample_rate: int,
+    target_midi: int,
+) -> PitchAnalysis:
+    """Measure an already-transposed sample around its expected register.
+
+    High-octave barks can be shorter than the source detector's 32 ms window.
+    Use a smaller frame and denser hop above C5 while retaining a wider frame
+    for low notes, then search within a musical fifth around the target.
+    """
+    target_hz = hz_from_midi(float(target_midi))
+    if target_hz < 500.0:
+        frame_size, hop_size = 2048, 160
+    elif target_hz < 1100.0:
+        frame_size, hop_size = 1024, 96
+    else:
+        frame_size, hop_size = 512, 48
+    frames = yin_track(
+        samples,
+        sample_rate,
+        frame_size=frame_size,
+        hop_size=hop_size,
+        fmin=target_hz / 1.5,
+        fmax=target_hz * 1.5,
+    )
+    try:
+        return summarise_pitch_frames(frames)
+    except ValueError as error:
+        if "No sufficiently voiced frames" not in str(error):
+            raise
+        return summarise_pitch_frames(frames, minimum_confidence=0.55)
 
 
 def playback_rate_resample(samples: np.ndarray, rate: float) -> np.ndarray:
@@ -531,71 +582,107 @@ def run(args: argparse.Namespace) -> int:
     worst_piano_loudness_error_db = 0.0
     for sample_name in SAMPLE_NAMES:
         sample_rate, samples, source_analysis = sources[sample_name]
-        for key_index, target_midi in enumerate(PIANO_TARGET_MIDI):
-            rate = 2.0 ** (
-                (target_midi - source_analysis.anchor_midi) / 12.0
+        for octave_start in PIANO_OCTAVE_STARTS:
+            base_midi = (octave_start + 1) * 12
+            playback_reference_midi = PIANO_PLAYBACK_REFERENCE_MIDI.get(
+                (sample_name, octave_start),
+                source_analysis.anchor_midi,
             )
-            rendered = playback_rate_resample(samples, rate)
-            rendered_analysis = analyze_pitch(rendered, sample_rate)
-            target_note = note_label(float(target_midi))[0]
-            target_hz = hz_from_midi(float(target_midi))
-            error_cents = (
-                rendered_analysis.anchor_midi - float(target_midi)
-            ) * 100.0
-            worst_piano_error_cents = max(
-                worst_piano_error_cents, abs(error_cents)
-            )
-            rendered_active_rms = active_rms(rendered, sample_rate)
-            calibrated_active_rms = rendered_active_rms * sample_gain[sample_name]
-            loudness_error_db = ratio_db(
-                calibrated_active_rms, loudness_target_rms
-            )
-            worst_piano_loudness_error_db = max(
-                worst_piano_loudness_error_db, abs(loudness_error_db)
-            )
-
-            if args.write_wavs:
-                filename = (
-                    f"{sample_name}_piano-{key_index + 1}_"
-                    f"{safe_file_part(target_note)}_rate-{rate:.8f}.wav"
+            for key_index, interval in enumerate(PIANO_SCALE_INTERVALS):
+                target_midi = base_midi + interval
+                rate = 2.0 ** (
+                    (target_midi - playback_reference_midi) / 12.0
                 )
-                write_pcm16_wav(temp_dir / filename, sample_rate, rendered)
+                rendered = playback_rate_resample(samples, rate)
+                try:
+                    rendered_analysis = analyze_transposed_pitch(
+                        rendered,
+                        sample_rate,
+                        target_midi,
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        f"{sample_name}/C{octave_start}/key-{key_index + 1}: {error}"
+                    ) from error
+                target_note = note_label(float(target_midi))[0]
+                target_hz = hz_from_midi(float(target_midi))
+                error_cents = (
+                    rendered_analysis.anchor_midi - float(target_midi)
+                ) * 100.0
+                worst_piano_error_cents = max(
+                    worst_piano_error_cents, abs(error_cents)
+                )
+                rendered_active_rms = active_rms(rendered, sample_rate)
+                calibrated_active_rms = rendered_active_rms * sample_gain[sample_name]
+                loudness_error_db = ratio_db(
+                    calibrated_active_rms, loudness_target_rms
+                )
+                worst_piano_loudness_error_db = max(
+                    worst_piano_loudness_error_db, abs(loudness_error_db)
+                )
 
-            piano_mappings.append(
-                {
-                    "sfx_id": SAMPLE_TO_SFX[sample_name],
-                    "sample": sample_name,
-                    "key_index": key_index,
-                    "source_anchor_hz": source_analysis.anchor_hz,
-                    "source_anchor_midi": source_analysis.anchor_midi,
-                    "target_note": target_note,
-                    "target_hz": target_hz,
-                    "target_midi": target_midi,
-                    "playback_rate": rate,
-                    "remeasured_hz": rendered_analysis.anchor_hz,
-                    "remeasured_midi": rendered_analysis.anchor_midi,
-                    "target_error_cents": error_cents,
-                    "sample_gain": sample_gain[sample_name],
-                    "remeasured_active_rms": rendered_active_rms,
-                    "calibrated_active_rms": calibrated_active_rms,
-                    "loudness_error_db": loudness_error_db,
-                    "remeasured_voiced_min_hz": rendered_analysis.voiced_min_hz,
-                    "remeasured_voiced_max_hz": rendered_analysis.voiced_max_hz,
-                }
-            )
+                if args.write_wavs:
+                    filename = (
+                        f"{sample_name}_piano-C{octave_start}-{key_index + 1}_"
+                        f"{safe_file_part(target_note)}_rate-{rate:.8f}.wav"
+                    )
+                    write_pcm16_wav(temp_dir / filename, sample_rate, rendered)
 
+                piano_mappings.append(
+                    {
+                        "sfx_id": SAMPLE_TO_SFX[sample_name],
+                        "sample": sample_name,
+                        "octave_start": octave_start,
+                        "key_index": key_index,
+                        "source_anchor_hz": source_analysis.anchor_hz,
+                        "source_anchor_midi": source_analysis.anchor_midi,
+                        "playback_reference_midi": playback_reference_midi,
+                        "target_note": target_note,
+                        "target_hz": target_hz,
+                        "target_midi": target_midi,
+                        "playback_rate": rate,
+                        "remeasured_hz": rendered_analysis.anchor_hz,
+                        "remeasured_midi": rendered_analysis.anchor_midi,
+                        "target_error_cents": error_cents,
+                        "sample_gain": sample_gain[sample_name],
+                        "remeasured_active_rms": rendered_active_rms,
+                        "calibrated_active_rms": calibrated_active_rms,
+                        "loudness_error_db": loudness_error_db,
+                        "remeasured_voiced_min_hz": rendered_analysis.voiced_min_hz,
+                        "remeasured_voiced_max_hz": rendered_analysis.voiced_max_hz,
+                    }
+                )
+
+    piano_pitch_outliers = [
+        mapping
+        for mapping in piano_mappings
+        if abs(mapping["target_error_cents"]) > args.strict_cents
+    ]
+    piano_loudness_outliers = [
+        mapping
+        for mapping in piano_mappings
+        if abs(mapping["loudness_error_db"]) > args.strict_loudness_db
+    ]
     report = {
         "method": {
             "detector": "frame-wise YIN",
             "anchor": "RMS × confidence weighted median of voiced-frame MIDI",
             "a4_hz": A4_HZ,
             "scale": "A minor pentatonic: A, C, D, E, G",
-            "piano_scale": "C major white keys: C4, D4, E4, F4, G4, A4, B4, C5",
+            "piano_scale": "C major white keys with octave starts C3, C4, C5, C6",
             "tier_rule": "fixed target MIDI per sample and screen key",
             "nearest_minor_tier_index_by_sample": NEAREST_TIER_INDEX,
             "normal_playback_reference_overrides": (
                 NORMAL_PLAYBACK_REFERENCE_MIDI
             ),
+            "piano_playback_reference_overrides": {
+                sample_name: {
+                    str(octave): reference
+                    for (sample, octave), reference in PIANO_PLAYBACK_REFERENCE_MIDI.items()
+                    if sample == sample_name
+                }
+                for sample_name in SAMPLE_NAMES
+            },
             "loudness": (
                 "20 ms gated active RMS; fixed per-sample gain referenced to da.wav"
             ),
@@ -625,6 +712,34 @@ def run(args: argparse.Namespace) -> int:
         "worst_piano_target_error_cents": worst_piano_error_cents,
         "worst_transposed_loudness_error_db": worst_loudness_error_db,
         "worst_piano_loudness_error_db": worst_piano_loudness_error_db,
+        "strict_validation": {
+            "pitch_limit_cents": args.strict_cents,
+            "loudness_limit_db": args.strict_loudness_db,
+            "piano_pitch_outliers": [
+                {
+                    "sample": mapping["sample"],
+                    "octave_start": mapping["octave_start"],
+                    "target_note": mapping["target_note"],
+                    "target_error_cents": mapping["target_error_cents"],
+                    "known_direct_exception": (
+                        mapping["sample"], mapping["octave_start"]
+                    ) in KNOWN_DIRECT_PITCH_EXCEPTIONS,
+                }
+                for mapping in piano_pitch_outliers
+            ],
+            "piano_loudness_outliers": [
+                {
+                    "sample": mapping["sample"],
+                    "octave_start": mapping["octave_start"],
+                    "target_note": mapping["target_note"],
+                    "loudness_error_db": mapping["loudness_error_db"],
+                    "known_direct_exception": (
+                        mapping["sample"], mapping["octave_start"]
+                    ) in KNOWN_DIRECT_LOUDNESS_EXCEPTIONS,
+                }
+                for mapping in piano_loudness_outliers
+            ],
+        },
     }
     output_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -650,6 +765,12 @@ def run(args: argparse.Namespace) -> int:
     print(
         f"Worst piano-mode loudness error: {worst_piano_loudness_error_db:.3f} dB"
     )
+    if piano_pitch_outliers or piano_loudness_outliers:
+        print(
+            "Strict piano outliers: "
+            f"{len(piano_pitch_outliers)} pitch, "
+            f"{len(piano_loudness_outliers)} loudness"
+        )
     for sample_name, sustain in sustain_regions.items():
         print(
             f"Sustain {sample_name}: pitch span "

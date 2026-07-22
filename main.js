@@ -15,8 +15,13 @@ const SPB = 60 / BPM;     // 每拍秒数
 const S16 = SPB / 4;      // 16 分音符（调度步长）
 const S8  = SPB / 2;      // 8 分音符（点击量化的最小节奏点）
 const MASTER_GAIN = 0.85;
+const PIANO_OCTAVE_MIN = 3;
+const PIANO_OCTAVE_MAX = 6;
+const PIANO_DEFAULT_OCTAVE_START = 4;
 const DEFAULT_PERFORMANCE_SETTINGS = Object.freeze({
   pianoMode: false,
+  octaveSwitching: false,
+  pianoOctaveStart: PIANO_DEFAULT_OCTAVE_START,
   rhythmSnap: true,
   showGrid: false,
 });
@@ -32,6 +37,8 @@ let bgmMuted = false;
 let sfxMuted = false;
 const performanceSettings = { ...DEFAULT_PERFORMANCE_SETTINGS };
 let performanceSettingsSaving = false;
+let pendingPianoOctaveCloudValue = null;
+let pianoOctaveCloudWriteRunning = false;
 
 let startTime = 0;        // 第 0 步对应的 audio 时间
 let nextNoteTime = 0;     // 调度器下一个音符时间
@@ -166,6 +173,8 @@ const TOY_CLOUD_KEYS = Object.freeze({
   dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
   hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
   pianoMode: 'dagou_piano_mode_v1',
+  octaveSwitching: 'dagou_octave_switching_v1',
+  pianoOctaveStart: 'dagou_piano_octave_start_v1',
   rhythmSnap: 'dagou_rhythm_snap_v1',
   showGrid: 'dagou_show_grid_v1',
 });
@@ -203,6 +212,9 @@ const dogAnimation2d = dogAnimationCanvas.getContext('2d', { alpha: true });
 const overlay   = document.getElementById('overlay');
 const keyGrid   = document.getElementById('key-grid');
 const flashLayer = document.getElementById('zoneflash');
+const octaveControls = document.getElementById('octave-controls');
+const octaveDownButton = document.getElementById('octave-down');
+const octaveUpButton = document.getElementById('octave-up');
 const subEl     = overlay.querySelector('.sub');
 const fx2d      = fxCanvas.getContext('2d');
 const topControls = document.getElementById('top-controls');
@@ -234,6 +246,7 @@ const hajimiSkinEmperorHint = hajimiSkinEmperor.querySelector('.skin-hint');
 const performanceSettingButtons = [
   ...document.querySelectorAll('.setting-row[data-setting]'),
 ];
+const octaveSwitchingSetting = document.getElementById('octave-switching-setting');
 const performanceSettingsStatus = document.getElementById(
   'performance-settings-status'
 );
@@ -538,6 +551,7 @@ const toyCloudState = {
 };
 const PERFORMANCE_SETTING_KEYS = Object.freeze({
   pianoMode: TOY_CLOUD_KEYS.pianoMode,
+  octaveSwitching: TOY_CLOUD_KEYS.octaveSwitching,
   rhythmSnap: TOY_CLOUD_KEYS.rhythmSnap,
   showGrid: TOY_CLOUD_KEYS.showGrid,
 });
@@ -559,6 +573,77 @@ function clearQueuedPerformanceInput() {
   lastCommittedInputTime = -Infinity;
   clearInputVisualTimers();
   for (const state of pointers.values()) state.pendingEntryId = null;
+}
+
+function settleActivePerformanceInput() {
+  clearQueuedPerformanceInput();
+  for (const inputId of [...pointers.keys()]) endInput(inputId, true);
+}
+
+function normalizePianoOctaveStart(value) {
+  const octave = Number(value);
+  return Number.isInteger(octave) &&
+    octave >= PIANO_OCTAVE_MIN &&
+    octave <= PIANO_OCTAVE_MAX
+    ? octave
+    : PIANO_DEFAULT_OCTAVE_START;
+}
+
+function effectivePianoOctaveStart(settings = performanceSettings) {
+  return settings.pianoMode && settings.octaveSwitching
+    ? normalizePianoOctaveStart(settings.pianoOctaveStart)
+    : PIANO_DEFAULT_OCTAVE_START;
+}
+
+function octaveControlsEnabled(settings = performanceSettings) {
+  return settings.pianoMode && settings.octaveSwitching;
+}
+
+function renderOctaveControlButton(button, currentOctave, targetOctave, direction) {
+  const available = targetOctave >= PIANO_OCTAVE_MIN && targetOctave <= PIANO_OCTAVE_MAX;
+  const currentLabel = `C${currentOctave}`;
+  const targetLabel = available
+    ? `C${targetOctave}`
+    : (direction < 0 ? 'MIN' : 'MAX');
+  const isLandscape = octaveControls.classList.contains('is-landscape');
+  const directionLabel = direction < 0 ? '低八度' : '高八度';
+
+  button.querySelector('.octave-current').textContent = currentLabel;
+  button.querySelector('.octave-target').textContent = targetLabel;
+  button.querySelector('.octave-arrow').textContent = isLandscape
+    ? (direction < 0 ? '←' : '→')
+    : (direction < 0 ? '↓' : '↑');
+  button.disabled = !available;
+  button.setAttribute(
+    'aria-label',
+    available
+      ? `当前起始音 ${currentLabel}，切换到${directionLabel} ${targetLabel}`
+      : `当前起始音 ${currentLabel}，已是${direction < 0 ? '最低' : '最高'}八度`,
+  );
+}
+
+function renderOctaveControls() {
+  const visible = octaveControlsEnabled();
+  const { width, height } = getStageMetrics();
+  const landscape = width >= height;
+  const currentOctave = effectivePianoOctaveStart();
+
+  octaveControls.classList.toggle('is-visible', visible);
+  octaveControls.classList.toggle('is-landscape', landscape);
+  octaveControls.setAttribute('aria-hidden', String(!visible));
+  octaveControls.inert = !visible;
+  renderOctaveControlButton(
+    octaveDownButton,
+    currentOctave,
+    currentOctave - 1,
+    -1,
+  );
+  renderOctaveControlButton(
+    octaveUpButton,
+    currentOctave,
+    currentOctave + 1,
+    1,
+  );
 }
 
 function renderKeyGrid() {
@@ -586,22 +671,33 @@ function applyPerformanceSettings(previousSettings) {
     clearQueuedPerformanceInput();
   }
 
+  const scaleChanged = previousSettings && (
+    previousSettings.pianoMode !== performanceSettings.pianoMode ||
+    effectivePianoOctaveStart(previousSettings) !== effectivePianoOctaveStart()
+  );
+  if (scaleChanged) settleActivePerformanceInput();
+
   if (
     zones.length === 0 ||
     !previousSettings ||
-    previousSettings.pianoMode !== performanceSettings.pianoMode
+    previousSettings.pianoMode !== performanceSettings.pianoMode ||
+    effectivePianoOctaveStart(previousSettings) !== effectivePianoOctaveStart()
   ) {
     buildGrid();
   } else {
     renderKeyGrid();
   }
+  renderOctaveControls();
 }
 
 function replacePerformanceSettings(nextSettings) {
   const previousSettings = { ...performanceSettings };
-  for (const key of Object.keys(DEFAULT_PERFORMANCE_SETTINGS)) {
+  for (const key of Object.keys(PERFORMANCE_SETTING_KEYS)) {
     performanceSettings[key] = nextSettings[key] === true;
   }
+  performanceSettings.pianoOctaveStart = normalizePianoOctaveStart(
+    nextSettings.pianoOctaveStart,
+  );
   applyPerformanceSettings(previousSettings);
 }
 
@@ -621,6 +717,14 @@ function readCloudPerformanceSettings(cloud) {
     if (value === '1') settings[settingName] = true;
     else if (value === '0') settings[settingName] = false;
   }
+  const cloudOctaveStart = Number(cloud[TOY_CLOUD_KEYS.pianoOctaveStart]);
+  const validCloudOctaveStart = Number.isInteger(cloudOctaveStart) &&
+    cloudOctaveStart >= PIANO_OCTAVE_MIN &&
+    cloudOctaveStart <= PIANO_OCTAVE_MAX;
+  settings.pianoOctaveStart = validCloudOctaveStart
+    ? cloudOctaveStart
+    : PIANO_DEFAULT_OCTAVE_START;
+  if (!validCloudOctaveStart) settings.octaveSwitching = false;
   return settings;
 }
 
@@ -629,6 +733,7 @@ function renderPerformanceSettings() {
     toyCloudState.initialized &&
     toyCloudState.environmentAvailable &&
     toyCloudState.cloudReadable;
+  octaveSwitchingSetting.hidden = !performanceSettings.pianoMode;
 
   for (const button of performanceSettingButtons) {
     const settingName = button.dataset.setting;
@@ -652,6 +757,7 @@ function renderPerformanceSettings() {
   } else {
     performanceSettingsStatus.textContent = '云存储不可用，本次设置仅在当前页面有效';
   }
+  renderOctaveControls();
 }
 
 function renderToyCloudState() {
@@ -1136,6 +1242,71 @@ for (const button of performanceSettingButtons) {
   });
 }
 
+async function flushPianoOctaveCloudWrite() {
+  const state = await toyStateReady;
+  if (!state.environmentAvailable || !state.cloudReadable || !state.toy) {
+    pendingPianoOctaveCloudValue = null;
+    pianoOctaveCloudWriteRunning = false;
+    return;
+  }
+
+  while (pendingPianoOctaveCloudValue !== null) {
+    const octave = pendingPianoOctaveCloudValue;
+    pendingPianoOctaveCloudValue = null;
+    try {
+      await state.toy.setCloudStorage({
+        [TOY_CLOUD_KEYS.pianoOctaveStart]: String(octave),
+      });
+    } catch (error) {
+      pendingPianoOctaveCloudValue = null;
+      markToyCloudUnavailable(state);
+      console.warn('[大狗Tap] 八度档位写入失败。', error);
+      showToyNotice('云存储不可用，本次八度仅在当前页面有效。');
+      break;
+    }
+  }
+
+  pianoOctaveCloudWriteRunning = false;
+  renderToyCloudState();
+}
+
+function queuePianoOctaveCloudWrite(octave) {
+  pendingPianoOctaveCloudValue = normalizePianoOctaveStart(octave);
+  if (pianoOctaveCloudWriteRunning) return;
+  pianoOctaveCloudWriteRunning = true;
+  void flushPianoOctaveCloudWrite();
+}
+
+function shiftPianoOctave(direction) {
+  if (!octaveControlsEnabled()) return false;
+  const currentOctave = normalizePianoOctaveStart(
+    performanceSettings.pianoOctaveStart,
+  );
+  const targetOctave = currentOctave + direction;
+  if (targetOctave < PIANO_OCTAVE_MIN || targetOctave > PIANO_OCTAVE_MAX) {
+    renderOctaveControls();
+    return true;
+  }
+
+  const previousSettings = { ...performanceSettings };
+  performanceSettings.pianoOctaveStart = targetOctave;
+  applyPerformanceSettings(previousSettings);
+  renderToyCloudState();
+  queuePianoOctaveCloudWrite(targetOctave);
+  return true;
+}
+
+for (const [button, direction] of [
+  [octaveDownButton, -1],
+  [octaveUpButton, 1],
+]) {
+  button.addEventListener('pointerdown', event => event.stopPropagation());
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    shiftPianoOctave(direction);
+  });
+}
+
 function openSettings() {
   if (settingsOpen) return;
   markSettingsSeen();
@@ -1248,6 +1419,26 @@ const BARK_NORMAL_SOURCE_MIDI = Object.freeze({
   ha: 72.732,
 });
 
+// 极端钢琴八度复测若出现稳定的整体偏差，只允许按“样本 + 起始八度”
+// 修正一个共同锚点；同一八度内八个白键仍严格保持十二平均律间隔。
+const BARK_PIANO_SOURCE_MIDI = Object.freeze({
+  // One minimax anchor per sample + octave keeps broad detector drift from
+  // turning into eight hand-tuned key values. C6 mi remains intentionally
+  // direct-pitched: a single anchor improves its extrema but cannot erase the
+  // non-uniform high-register analysis error.
+  mi: Object.freeze({
+    5: 65.60141325112846,
+    6: 65.17172575112846,
+  }),
+  dingdongji_ding: Object.freeze({
+    3: 68.49322934072657,
+    6: 68.86822934072657,
+  }),
+  dingdongji_ji: Object.freeze({
+    6: 69.64941723104747,
+  }),
+});
+
 // 固定 A 小调五声音阶（A–C–D–E–G）。大狗叫与叮咚鸡的第三档是最接近
 // 原声的音；哈基米移除旧最低档、将原前三档后移，因此第四档最接近原声。
 const BARK_TARGET_MIDI = Object.freeze({
@@ -1276,18 +1467,20 @@ const SFX_SAMPLE_GAIN = Object.freeze({
   dingdongji_ji: 2.3501763429894065,
 });
 
-// 钢琴模式使用 C 大调白键。前七键严格覆盖 C4–B4，第八键以 C5
-// 闭合一个完整八度（do–re–mi–fa–sol–la–si–do）。
-const PIANO_SCALE = Object.freeze([
-  Object.freeze({ midi: 60, note: 'C4', solfege: 'do' }),
-  Object.freeze({ midi: 62, note: 'D4', solfege: 're' }),
-  Object.freeze({ midi: 64, note: 'E4', solfege: 'mi' }),
-  Object.freeze({ midi: 65, note: 'F4', solfege: 'fa' }),
-  Object.freeze({ midi: 67, note: 'G4', solfege: 'sol' }),
-  Object.freeze({ midi: 69, note: 'A4', solfege: 'la' }),
-  Object.freeze({ midi: 71, note: 'B4', solfege: 'si' }),
-  Object.freeze({ midi: 72, note: 'C5', solfege: 'do' }),
-]);
+// 钢琴模式按起始八度动态生成 C 大调白键；第八键以高音 C 闭合完整八度。
+const PIANO_SCALE_INTERVALS = Object.freeze([0, 2, 4, 5, 7, 9, 11, 12]);
+const PIANO_SCALE_NOTES = Object.freeze(['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C']);
+const PIANO_SCALE_SOLFEGE = Object.freeze(['do', 're', 'mi', 'fa', 'sol', 'la', 'si', 'do']);
+
+function buildPianoScale(octaveStart = PIANO_DEFAULT_OCTAVE_START) {
+  const octave = normalizePianoOctaveStart(octaveStart);
+  const baseMidi = (octave + 1) * 12;
+  return PIANO_SCALE_INTERVALS.map((interval, index) => Object.freeze({
+    midi: baseMidi + interval,
+    note: `${PIANO_SCALE_NOTES[index]}${index === 7 ? octave + 1 : octave}`,
+    solfege: PIANO_SCALE_SOLFEGE[index],
+  }));
+}
 const PIANO_KEYBOARD_ROWS = Object.freeze([
   Object.freeze(['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI']),
   Object.freeze(['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK']),
@@ -1738,9 +1931,14 @@ function quantize(unit) {
   return t;
 }
 
-function barkPlaybackRate(sample, pitchTier, fixedTargetMidi) {
+function barkPlaybackRate(sample, pitchTier, fixedTargetMidi, pianoOctaveStart) {
+  const octaveReference = Number.isFinite(fixedTargetMidi)
+    ? BARK_PIANO_SOURCE_MIDI[sample]?.[
+        normalizePianoOctaveStart(pianoOctaveStart)
+      ]
+    : undefined;
   const sourceMidi = Number.isFinite(fixedTargetMidi)
-    ? BARK_SOURCE_MIDI[sample]
+    ? (octaveReference ?? BARK_SOURCE_MIDI[sample])
     : (BARK_NORMAL_SOURCE_MIDI[sample] ?? BARK_SOURCE_MIDI[sample]);
   const targetMidi = Number.isFinite(fixedTargetMidi)
     ? fixedTargetMidi
@@ -2075,6 +2273,9 @@ function forceStopVoice(voice) {
 function buildGrid() {
   const { width, height } = getStageMetrics();
   const landscape = width >= height;
+  const pianoScale = performanceSettings.pianoMode
+    ? buildPianoScale(effectivePianoOctaveStart())
+    : null;
   cols = landscape ? (performanceSettings.pianoMode ? 8 : 4) : 3;
   rows = landscape ? 3 : (performanceSettings.pianoMode ? 8 : 4);
 
@@ -2084,12 +2285,13 @@ function buildGrid() {
     const rowMap = [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const pianoKey = performanceSettings.pianoMode ? PIANO_SCALE[c] : null;
+        const pianoKey = pianoScale?.[c] ?? null;
         zones.push({
           sample: rowMap[r].n,
           syllable: rowMap[r].s,
           pitchTier: c,
           targetMidi: pianoKey?.midi,
+          pianoOctaveStart: pianoKey ? effectivePianoOctaveStart() : undefined,
           note: pianoKey?.note,
           solfege: pianoKey?.solfege,
         });
@@ -2101,16 +2303,15 @@ function buildGrid() {
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const pianoIndex = performanceSettings.pianoMode
-          ? PIANO_SCALE.length - 1 - r
+          ? pianoScale.length - 1 - r
           : r;
-        const pianoKey = performanceSettings.pianoMode
-          ? PIANO_SCALE[pianoIndex]
-          : null;
+        const pianoKey = pianoScale?.[pianoIndex] ?? null;
         zones.push({
           sample: colMap[c].n,
           syllable: colMap[c].s,
           pitchTier: pianoIndex,
           targetMidi: pianoKey?.midi,
+          pianoOctaveStart: pianoKey ? effectivePianoOctaveStart() : undefined,
           note: pianoKey?.note,
           solfege: pianoKey?.solfege,
         });
@@ -2119,6 +2320,7 @@ function buildGrid() {
   }
 
   if (typeof renderKeyGrid === 'function') renderKeyGrid();
+  if (typeof renderOctaveControls === 'function') renderOctaveControls();
 }
 
 function zoneIndex(x, y) {
@@ -2879,6 +3081,7 @@ function enqueueActivation(zi, pointerId) {
     audioSample: resolveSfxSample(z.sample),
     pitchTier: z.pitchTier,
     targetMidi: z.targetMidi,
+    pianoOctaveStart: z.pianoOctaveStart,
     when: 0,
   };
   inputQueue.push(entry);
@@ -2900,6 +3103,7 @@ function enqueueSustainRetune(zi, pointerId, voice) {
     audioSample: voice?.name ?? resolveSfxSample(z.sample),
     pitchTier: z.pitchTier,
     targetMidi: z.targetMidi,
+    pianoOctaveStart: z.pianoOctaveStart,
     voice,
     when: 0,
   };
@@ -2934,7 +3138,8 @@ function playQueuedInput(entry) {
   const rate = barkPlaybackRate(
     audioSample,
     entry.pitchTier,
-    entry.targetMidi
+    entry.targetMidi,
+    entry.pianoOctaveStart,
   );
   if (entry.kind === 'sustain-retune') {
     if (retuneSustainVoice(entry.voice, rate, entry.when)) {
@@ -3176,6 +3381,13 @@ function handlePianoKeyDown(event) {
     settingsOpen ||
     unlockConfirmOpen
   ) return;
+
+  if (event.code === 'ArrowLeft' || event.code === 'ArrowRight') {
+    if (!octaveControlsEnabled()) return;
+    event.preventDefault();
+    shiftPianoOctave(event.code === 'ArrowLeft' ? -1 : 1);
+    return;
+  }
 
   const zi = pianoZoneIndexForCode(event.code);
   if (zi < 0) return;

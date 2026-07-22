@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 const toolsDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.dirname(toolsDir);
 const mainSource = fs.readFileSync(path.join(rootDir, 'main.js'), 'utf8');
+const htmlSource = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
 
 function extractFunction(name) {
   const start = mainSource.indexOf(`function ${name}(`);
@@ -64,6 +65,21 @@ assert.match(
   extractFunction('handlePianoKeyDown'),
   /beginZoneInput\(inputId, zi\)/,
   'physical keyboard presses must reuse the pointer zone-input path',
+);
+assert.match(
+  extractFunction('handlePianoKeyDown'),
+  /shiftPianoOctave\(event\.code === 'ArrowLeft' \? -1 : 1\)/,
+  'left and right arrows must share the octave-shift path',
+);
+assert.match(
+  htmlSource,
+  /#octave-controls\s*\{[\s\S]*?z-index:\s*12;/,
+  'octave controls must stay above the startup overlay while remaining below top controls',
+);
+assert.match(
+  mainSource,
+  /button\.addEventListener\('pointerdown', event => event\.stopPropagation\(\)\)/,
+  'octave controls must not leak pointerdown into the stage startup/input handler',
 );
 assert.match(
   extractFunction('handlePianoKeyUp'),
@@ -181,7 +197,11 @@ const keyboardSandbox = {};
 vm.runInNewContext(
   `
   let zones = [];
-  const performanceSettings = { pianoMode: true };
+  const performanceSettings = {
+    pianoMode: true,
+    octaveSwitching: true,
+    pianoOctaveStart: 4,
+  };
   const pointers = new Map();
   let settingsOpen = false;
   let unlockConfirmOpen = false;
@@ -194,6 +214,13 @@ vm.runInNewContext(
   function createInputState() { return {}; }
   function hideControlsUntilIdle() {}
   function start() { calls.push({ kind: 'start' }); }
+  function octaveControlsEnabled() {
+    return performanceSettings.pianoMode && performanceSettings.octaveSwitching;
+  }
+  function shiftPianoOctave(direction) {
+    calls.push({ kind: 'octave', direction });
+    return true;
+  }
   function beginZoneInput(inputId, zi) {
     pointers.set(inputId, {});
     calls.push({ kind: 'begin', inputId, zi });
@@ -214,6 +241,8 @@ vm.runInNewContext(
     keyUp: handlePianoKeyUp,
     setZones(nextZones) { zones = nextZones; },
     setPianoMode(enabled) { performanceSettings.pianoMode = enabled; },
+    setOctaveSwitching(enabled) { performanceSettings.octaveSwitching = enabled; },
+    setSettingsOpen(open) { settingsOpen = open; },
     calls,
     pointers,
   };
@@ -272,6 +301,34 @@ const keyboardEvent = (code, overrides = {}) => ({
   preventDefault() { this.defaultPrevented = true; },
   ...overrides,
 });
+const octaveLeft = keyboardEvent('ArrowLeft');
+const octaveRight = keyboardEvent('ArrowRight');
+keyboardApi.keyDown(octaveLeft);
+keyboardApi.keyDown(octaveRight);
+assert.equal(octaveLeft.defaultPrevented, true);
+assert.equal(octaveRight.defaultPrevented, true);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(keyboardApi.calls)),
+  [
+    { kind: 'octave', direction: -1 },
+    { kind: 'octave', direction: 1 },
+  ],
+  'arrow keys must move one octave in their respective directions',
+);
+keyboardApi.keyDown(keyboardEvent('ArrowRight', { repeat: true }));
+keyboardApi.keyDown(keyboardEvent('ArrowLeft', { ctrlKey: true }));
+assert.equal(keyboardApi.calls.length, 2, 'repeat and modified arrows must be ignored');
+keyboardApi.setOctaveSwitching(false);
+const disabledArrow = keyboardEvent('ArrowRight');
+keyboardApi.keyDown(disabledArrow);
+assert.equal(disabledArrow.defaultPrevented, undefined);
+keyboardApi.setOctaveSwitching(true);
+keyboardApi.setSettingsOpen(true);
+keyboardApi.keyDown(keyboardEvent('ArrowRight'));
+assert.equal(keyboardApi.calls.length, 2, 'settings dialogs must block octave arrows');
+keyboardApi.setSettingsOpen(false);
+keyboardApi.calls.length = 0;
+
 const qDown = keyboardEvent('KeyQ');
 const aDown = keyboardEvent('KeyA');
 keyboardApi.keyDown(qDown);
@@ -303,6 +360,69 @@ assert.deepEqual(
     { kind: 'end', inputId: 'keyboard:KeyA', musical: true },
   ],
 );
+
+assert.match(
+  extractFunction('applyPerformanceSettings'),
+  /if \(scaleChanged\) settleActivePerformanceInput\(\)/,
+  'changing the active piano scale must settle held and queued input',
+);
+assert.match(
+  extractFunction('flushPianoOctaveCloudWrite'),
+  /while \(pendingPianoOctaveCloudValue !== null\)/,
+  'octave cloud writes must drain the latest pending value serially',
+);
+
+const octaveSandbox = {};
+vm.runInNewContext(
+  `
+  const PIANO_OCTAVE_MIN = 3;
+  const PIANO_OCTAVE_MAX = 6;
+  const PIANO_DEFAULT_OCTAVE_START = 4;
+  const performanceSettings = {
+    pianoMode: true,
+    octaveSwitching: true,
+    pianoOctaveStart: 4,
+  };
+  const applied = [];
+  const queued = [];
+  function applyPerformanceSettings(previous) {
+    applied.push({ previous: previous.pianoOctaveStart, next: performanceSettings.pianoOctaveStart });
+  }
+  function renderToyCloudState() {}
+  function renderOctaveControls() {}
+  function queuePianoOctaveCloudWrite(octave) { queued.push(octave); }
+  ${extractFunction('normalizePianoOctaveStart')}
+  ${extractFunction('octaveControlsEnabled')}
+  ${extractFunction('shiftPianoOctave')}
+  globalThis.octaveApi = {
+    shift: shiftPianoOctave,
+    current: () => performanceSettings.pianoOctaveStart,
+    setEnabled(enabled) { performanceSettings.octaveSwitching = enabled; },
+    applied,
+    queued,
+  };
+  `,
+  octaveSandbox,
+);
+
+const octaveApi = octaveSandbox.octaveApi;
+assert.equal(octaveApi.shift(-1), true);
+assert.equal(octaveApi.current(), 3);
+assert.equal(octaveApi.shift(-1), true);
+assert.equal(octaveApi.current(), 3, 'C3 must be a hard lower boundary');
+assert.equal(octaveApi.shift(1), true);
+assert.equal(octaveApi.shift(1), true);
+assert.equal(octaveApi.shift(1), true);
+assert.equal(octaveApi.current(), 6);
+assert.equal(octaveApi.shift(1), true);
+assert.equal(octaveApi.current(), 6, 'C6 must be a hard upper boundary');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(octaveApi.queued)),
+  [3, 4, 5, 6],
+  'only successful octave changes should be persisted',
+);
+octaveApi.setEnabled(false);
+assert.equal(octaveApi.shift(-1), false, 'disabled octave switching must ignore changes');
 
 const sustainQueueSandbox = {};
 vm.runInNewContext(
@@ -547,3 +667,4 @@ console.log('- da, gou, and jiao each keep only their newest queued item');
 console.log('- held third-syllable voices retune in place and keep release-frame tracking');
 console.log('- free rhythm bypasses quantization and same-sample queue replacement');
 console.log('- piano keyboard rows reuse the shared input path in both orientations');
+console.log('- octave arrows, boundaries, queue cleanup, and latest-value persistence are wired');

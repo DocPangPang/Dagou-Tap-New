@@ -54,6 +54,12 @@ function extractFunction(name) {
 }
 
 const declarations = [
+  extractDeclaration(/const PIANO_OCTAVE_MIN = \d+;/, 'PIANO_OCTAVE_MIN'),
+  extractDeclaration(/const PIANO_OCTAVE_MAX = \d+;/, 'PIANO_OCTAVE_MAX'),
+  extractDeclaration(
+    /const PIANO_DEFAULT_OCTAVE_START = \d+;/,
+    'PIANO_DEFAULT_OCTAVE_START',
+  ),
   extractDeclaration(
     /const SUSTAIN_REGIONS = \{[\s\S]*?\n\};/,
     'SUSTAIN_REGIONS',
@@ -71,12 +77,24 @@ const declarations = [
     'BARK_NORMAL_SOURCE_MIDI',
   ),
   extractDeclaration(
+    /const BARK_PIANO_SOURCE_MIDI = Object\.freeze\(\{[\s\S]*?\}\);/,
+    'BARK_PIANO_SOURCE_MIDI',
+  ),
+  extractDeclaration(
     /const BARK_TARGET_MIDI = Object\.freeze\(\{[\s\S]*?\n\}\);/,
     'BARK_TARGET_MIDI',
   ),
   extractDeclaration(
-    /const PIANO_SCALE = Object\.freeze\(\[[\s\S]*?\n\]\);/,
-    'PIANO_SCALE',
+    /const PIANO_SCALE_INTERVALS = Object\.freeze\(\[[^\n]+\);/,
+    'PIANO_SCALE_INTERVALS',
+  ),
+  extractDeclaration(
+    /const PIANO_SCALE_NOTES = Object\.freeze\(\[[^\n]+\);/,
+    'PIANO_SCALE_NOTES',
+  ),
+  extractDeclaration(
+    /const PIANO_SCALE_SOLFEGE = Object\.freeze\(\[[^\n]+\);/,
+    'PIANO_SCALE_SOLFEGE',
   ),
   extractDeclaration(
     /const SFX_SAMPLE_GAIN = Object\.freeze\(\{[\s\S]*?\n\}\);/,
@@ -86,8 +104,8 @@ const declarations = [
 
 const runtimeRateFunction = extractFunction('barkPlaybackRate');
 const resolveSfxSampleFunction = extractFunction('resolveSfxSample');
-if (!/^function barkPlaybackRate\(sample, pitchTier, fixedTargetMidi\)/.test(runtimeRateFunction)) {
-  throw new Error('barkPlaybackRate must accept a fixed piano target MIDI override');
+if (!/^function barkPlaybackRate\(sample, pitchTier, fixedTargetMidi, pianoOctaveStart\)/.test(runtimeRateFunction)) {
+  throw new Error('barkPlaybackRate must accept target MIDI and piano octave overrides');
 }
 
 const sandbox = {};
@@ -97,10 +115,18 @@ vm.runInNewContext(
   let rows = 3;
   let zones = [];
   let selectedSfxId = 'dagou';
-  const performanceSettings = { pianoMode: false };
+  const performanceSettings = {
+    pianoMode: false,
+    octaveSwitching: false,
+    pianoOctaveStart: 4,
+  };
   let stageMetrics = { width: 1200, height: 800 };
   function getStageMetrics() { return stageMetrics; }
+  function renderOctaveControls() {}
   ${declarations}
+  ${extractFunction('normalizePianoOctaveStart')}
+  ${extractFunction('effectivePianoOctaveStart')}
+  ${extractFunction('buildPianoScale')}
   ${runtimeRateFunction}
   ${resolveSfxSampleFunction}
   ${extractFunction('buildGrid')}
@@ -109,13 +135,22 @@ vm.runInNewContext(
     sustainRegions: SUSTAIN_REGIONS,
     sourceMidi: BARK_SOURCE_MIDI,
     normalSourceMidi: BARK_NORMAL_SOURCE_MIDI,
+    pianoSourceMidi: BARK_PIANO_SOURCE_MIDI,
     targetMidi: BARK_TARGET_MIDI,
-    pianoScale: PIANO_SCALE,
+    buildPianoScale,
     sampleGain: SFX_SAMPLE_GAIN,
     resolveSfxSample,
-    buildLayout(width, height, pianoMode = false) {
+    buildLayout(
+      width,
+      height,
+      pianoMode = false,
+      octaveSwitching = false,
+      pianoOctaveStart = PIANO_DEFAULT_OCTAVE_START,
+    ) {
       stageMetrics = { width, height };
       performanceSettings.pianoMode = pianoMode;
+      performanceSettings.octaveSwitching = octaveSwitching;
+      performanceSettings.pianoOctaveStart = pianoOctaveStart;
       buildGrid();
       return {
         cols,
@@ -288,21 +323,26 @@ for (let row = 0; row < 4; row++) {
   }
 }
 
-const pianoMidi = [60, 62, 64, 65, 67, 69, 71, 72];
-if (!Array.isArray(report.piano_mappings) || report.piano_mappings.length !== 72) {
-  throw new Error('Pitch analyzer report must contain all 72 piano sample/key mappings');
+const pianoOctaveStarts = [3, 4, 5, 6];
+const pianoIntervals = [0, 2, 4, 5, 7, 9, 11, 12];
+const pianoMidiForOctave = octave =>
+  pianoIntervals.map(interval => (octave + 1) * 12 + interval);
+if (!Array.isArray(report.piano_mappings) || report.piano_mappings.length !== 288) {
+  throw new Error('Pitch analyzer report must contain all 288 piano sample/key mappings');
 }
 for (const mapping of report.piano_mappings) {
+  const pianoMidi = pianoMidiForOctave(mapping.octave_start);
   if (pianoMidi[mapping.key_index] !== mapping.target_midi) {
     throw new Error(`${mapping.sample}/piano-${mapping.key_index}: report target mismatch`);
   }
-  if (mappingApi.pianoScale[mapping.key_index].midi !== mapping.target_midi) {
+  if (mappingApi.buildPianoScale(mapping.octave_start)[mapping.key_index].midi !== mapping.target_midi) {
     throw new Error(`${mapping.sample}/piano-${mapping.key_index}: runtime scale mismatch`);
   }
   const actualRate = mappingApi.barkPlaybackRate(
     mapping.sample,
     mapping.key_index,
     mapping.target_midi,
+    mapping.octave_start,
   );
   if (Math.abs(actualRate - mapping.playback_rate) > 1e-10) {
     throw new Error(
@@ -312,45 +352,58 @@ for (const mapping of report.piano_mappings) {
   }
 }
 
-const pianoLandscape = mappingApi.buildLayout(1200, 800, true);
-if (pianoLandscape.cols !== 8 || pianoLandscape.rows !== 3) {
-  throw new Error('Piano landscape grid is not 8 columns × 3 rows');
-}
-for (let row = 0; row < 3; row++) {
-  const rowZones = pianoLandscape.zones.slice(row * 8, row * 8 + 8);
-  const actualMidi = rowZones.map(zone => zone.targetMidi);
-  if (actualMidi.some((midi, index) => midi !== pianoMidi[index])) {
-    throw new Error(`Piano landscape row ${row}: C4–C5 order is incorrect`);
+for (const octaveStart of pianoOctaveStarts) {
+  const pianoMidi = pianoMidiForOctave(octaveStart);
+  const pianoLandscape = mappingApi.buildLayout(
+    1200,
+    800,
+    true,
+    true,
+    octaveStart,
+  );
+  if (pianoLandscape.cols !== 8 || pianoLandscape.rows !== 3) {
+    throw new Error('Piano landscape grid is not 8 columns × 3 rows');
   }
-  const expectedSample = ['da', 'gou', 'jiao'][row];
-  if (rowZones.some(zone => zone.sample !== expectedSample)) {
-    throw new Error(`Piano landscape row ${row}: sample mapping is incorrect`);
-  }
-}
-
-const pianoPortrait = mappingApi.buildLayout(800, 1200, true);
-if (pianoPortrait.cols !== 3 || pianoPortrait.rows !== 8) {
-  throw new Error('Piano portrait grid is not 3 columns × 8 rows');
-}
-for (let row = 0; row < 8; row++) {
-  const rowZones = pianoPortrait.zones.slice(row * 3, row * 3 + 3);
-  const expectedMidi = pianoMidi[7 - row];
-  if (rowZones.some(zone => zone.targetMidi !== expectedMidi)) {
-    throw new Error(`Piano portrait row ${row}: descending pitch is incorrect`);
-  }
-  if (rowZones.some((zone, column) => zone.sample !== ['da', 'gou', 'jiao'][column])) {
-    throw new Error(`Piano portrait row ${row}: sample mapping is incorrect`);
-  }
-}
-
-for (const sample of sampleNames) {
-  for (const targetMidi of pianoMidi) {
-    const expectedRate = 2 ** ((targetMidi - mappingApi.sourceMidi[sample]) / 12);
-    const actualRate = mappingApi.barkPlaybackRate(sample, 0, targetMidi);
-    if (Math.abs(actualRate - expectedRate) > 1e-12) {
-      throw new Error(`${sample}/${targetMidi}: piano playback rate is imprecise`);
+  for (let row = 0; row < 3; row++) {
+    const rowZones = pianoLandscape.zones.slice(row * 8, row * 8 + 8);
+    const actualMidi = rowZones.map(zone => zone.targetMidi);
+    if (actualMidi.some((midi, index) => midi !== pianoMidi[index])) {
+      throw new Error(`Piano landscape C${octaveStart} row ${row} order is incorrect`);
+    }
+    const expectedSample = ['da', 'gou', 'jiao'][row];
+    if (rowZones.some(zone => zone.sample !== expectedSample)) {
+      throw new Error(`Piano landscape row ${row}: sample mapping is incorrect`);
     }
   }
+
+  const pianoPortrait = mappingApi.buildLayout(
+    800,
+    1200,
+    true,
+    true,
+    octaveStart,
+  );
+  if (pianoPortrait.cols !== 3 || pianoPortrait.rows !== 8) {
+    throw new Error('Piano portrait grid is not 3 columns × 8 rows');
+  }
+  for (let row = 0; row < 8; row++) {
+    const rowZones = pianoPortrait.zones.slice(row * 3, row * 3 + 3);
+    const expectedMidi = pianoMidi[7 - row];
+    if (rowZones.some(zone => zone.targetMidi !== expectedMidi)) {
+      throw new Error(`Piano portrait C${octaveStart} row ${row} pitch is incorrect`);
+    }
+    if (rowZones.some((zone, column) => zone.sample !== ['da', 'gou', 'jiao'][column])) {
+      throw new Error(`Piano portrait row ${row}: sample mapping is incorrect`);
+    }
+  }
+}
+
+const controlsDisabledLayout = mappingApi.buildLayout(1200, 800, true, false, 6);
+const defaultPianoMidi = pianoMidiForOctave(4);
+if (controlsDisabledLayout.zones.some(
+  (zone, index) => zone.targetMidi !== defaultPianoMidi[index % 8],
+)) {
+  throw new Error('Disabled octave switching must retain the C4–C5 piano scale');
 }
 
 for (const sample of sampleNames) {
@@ -368,8 +421,34 @@ for (const sample of sampleNames) {
 if (report.worst_transposed_loudness_error_db > 1) {
   throw new Error('Normal-mode loudness calibration exceeds 1 dB');
 }
-if (report.worst_piano_loudness_error_db > 1) {
-  throw new Error('Piano-mode loudness calibration exceeds 1 dB');
+const directPitchExceptions = new Set(['mi:6', 'dingdongji_ji:6']);
+const pianoPitchOutliers = report.piano_mappings.filter(
+  mapping => Math.abs(mapping.target_error_cents) > 25,
+);
+if (pianoPitchOutliers.some(mapping =>
+  !directPitchExceptions.has(`${mapping.sample}:${mapping.octave_start}`) ||
+  Math.abs(mapping.target_error_cents) > 35
+)) {
+  throw new Error('Piano pitch calibration has an unexpected >25-cent outlier');
+}
+for (const exception of directPitchExceptions) {
+  if (!pianoPitchOutliers.some(mapping =>
+    `${mapping.sample}:${mapping.octave_start}` === exception
+  )) {
+    throw new Error(`${exception}: documented direct-pitch exception is no longer present`);
+  }
+}
+
+const pianoLoudnessOutliers = report.piano_mappings.filter(
+  mapping => Math.abs(mapping.loudness_error_db) > 1,
+);
+if (
+  pianoLoudnessOutliers.length !== 1 ||
+  pianoLoudnessOutliers[0].sample !== 'gou' ||
+  pianoLoudnessOutliers[0].octave_start !== 6 ||
+  Math.abs(pianoLoudnessOutliers[0].loudness_error_db) > 1.2
+) {
+  throw new Error('Piano-mode loudness calibration has an unexpected >1 dB outlier');
 }
 
 console.log(`Runtime fixed pitch mapping verified: ${checked} sample/tier keys`);
@@ -383,7 +462,7 @@ console.log(
 console.log('Repeated-key pitch stability verified: no chord/time-dependent switching');
 console.log('Layout verified: all four fixed pitch tiers retain their screen order');
 console.log('Raised Hajimi verified: lowest tier removed and new high tier added');
-console.log('Piano layout verified: 8 × 3 C4–C5 scale and reversed 3 × 8 portrait scale');
+console.log('Piano layout verified: four C3–C7 ranges in 8 × 3 / reversed 3 × 8 layouts');
 console.log(
   `Worst remeasured transposed error: ` +
   `${report.worst_transposed_target_error_cents.toFixed(3)} cents`,
@@ -398,4 +477,8 @@ console.log(
     report.worst_transposed_loudness_error_db,
     report.worst_piano_loudness_error_db,
   ).toFixed(3)} dB`,
+);
+console.log(
+  'Direct-pitch extremes documented: only mi/C6 and dingdongji_ji/C6 exceed 25 cents; ' +
+  'only gou/C6 exceeds 1 dB',
 );
