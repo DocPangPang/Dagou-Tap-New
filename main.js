@@ -1288,6 +1288,12 @@ const PIANO_SCALE = Object.freeze([
   Object.freeze({ midi: 71, note: 'B4', solfege: 'si' }),
   Object.freeze({ midi: 72, note: 'C5', solfege: 'do' }),
 ]);
+const PIANO_KEYBOARD_ROWS = Object.freeze([
+  Object.freeze(['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI']),
+  Object.freeze(['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK']),
+  Object.freeze(['KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN', 'KeyM', 'Comma']),
+]);
+const PIANO_KEYBOARD_SAMPLES = Object.freeze(['da', 'gou', 'jiao']);
 
 /* ============================================================
  * 主色调色板（全页面只用这几支颜色）
@@ -2122,6 +2128,25 @@ function zoneIndex(x, y) {
   const c = Math.min(cols - 1, Math.max(0, Math.floor(localX / width * cols)));
   const r = Math.min(rows - 1, Math.max(0, Math.floor(localY / height * rows)));
   return r * cols + c;
+}
+
+function pianoKeyboardBinding(code) {
+  for (let rowIndex = 0; rowIndex < PIANO_KEYBOARD_ROWS.length; rowIndex++) {
+    const pitchTier = PIANO_KEYBOARD_ROWS[rowIndex].indexOf(code);
+    if (pitchTier >= 0) {
+      return { sample: PIANO_KEYBOARD_SAMPLES[rowIndex], pitchTier };
+    }
+  }
+  return null;
+}
+
+function pianoZoneIndexForCode(code) {
+  if (!performanceSettings.pianoMode) return -1;
+  const binding = pianoKeyboardBinding(code);
+  if (!binding) return -1;
+  return zones.findIndex(
+    zone => zone.sample === binding.sample && zone.pitchTier === binding.pitchTier
+  );
 }
 
 /* 返回一条指针线段实际穿过的全部格子，避免快速移动时浏览器只上报首尾格。 */
@@ -3059,19 +3084,28 @@ function enterZone(pointerId, state, zi) {
   commitUnsnappedInput(entry);
 }
 
+function createInputState(lastX = 0, lastY = 0) {
+  return {
+    zone: -1,
+    voice: null,
+    pendingEntryId: null,
+    lastX,
+    lastY,
+  };
+}
+
+function beginZoneInput(inputId, zi, lastX = 0, lastY = 0) {
+  const state = createInputState(lastX, lastY);
+  // 指针和实体键盘共用同一个分区进入、排队、发声与视觉反馈入口。
+  pointers.set(inputId, state);
+  enterZone(inputId, state, zi);
+  return state;
+}
+
 function tryActivate(pointerId, x, y, state) {
   if (!state) {
-    state = {
-      zone: -1,
-      voice: null,
-      pendingEntryId: null,
-      lastX: x,
-      lastY: y,
-    };
     // 自由节奏会在 enterZone 内立即播放，先注册状态才能正确接管 jiao 长音。
-    pointers.set(pointerId, state);
-    enterZone(pointerId, state, zoneIndex(x, y));
-    return state;
+    return beginZoneInput(pointerId, zoneIndex(x, y), x, y);
   }
 
   for (const zi of zonesAlongSegment(state.lastX, state.lastY, x, y)) {
@@ -3085,13 +3119,7 @@ function tryActivate(pointerId, x, y, state) {
 stage.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   if (!started || !buffers.da) {
-    pointers.set(e.pointerId, {
-      zone: -1,
-      voice: null,
-      pendingEntryId: null,
-      lastX: e.clientX,
-      lastY: e.clientY,
-    });
+    pointers.set(e.pointerId, createInputState(e.clientX, e.clientY));
     hideControlsUntilIdle();
     start();
     return;
@@ -3118,15 +3146,19 @@ stage.addEventListener('pointermove', (e) => {
   );
 }, { passive: false });
 
-function endPointer(e, musical) {
-  const state = pointers.get(e.pointerId);
+function endInput(inputId, musical) {
+  const state = pointers.get(inputId);
   if (state && state.voice) {
     if (musical) releaseVoice(state.voice, true);
     else forceStopVoice(state.voice);
   }
-  if (!musical) cancelQueuedInputs(e.pointerId);
-  pointers.delete(e.pointerId);
+  if (!musical) cancelQueuedInputs(inputId);
+  pointers.delete(inputId);
   if (pointers.size === 0) hideControlsUntilIdle();
+}
+
+function endPointer(e, musical) {
+  endInput(e.pointerId, musical);
   try {
     if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
   } catch (_) { /* 指针捕获可能已经自动释放 */ }
@@ -3134,6 +3166,43 @@ function endPointer(e, musical) {
 
 window.addEventListener('pointerup', (e) => endPointer(e, true));
 window.addEventListener('pointercancel', (e) => endPointer(e, false));
+
+function handlePianoKeyDown(event) {
+  if (
+    event.repeat ||
+    event.ctrlKey ||
+    event.altKey ||
+    event.metaKey ||
+    settingsOpen ||
+    unlockConfirmOpen
+  ) return;
+
+  const zi = pianoZoneIndexForCode(event.code);
+  if (zi < 0) return;
+
+  const inputId = `keyboard:${event.code}`;
+  if (pointers.has(inputId)) return;
+  event.preventDefault();
+
+  if (!started || !buffers.da) {
+    pointers.set(inputId, createInputState());
+    hideControlsUntilIdle();
+    start();
+    return;
+  }
+  beginZoneInput(inputId, zi);
+}
+
+function handlePianoKeyUp(event) {
+  if (!pianoKeyboardBinding(event.code)) return;
+  const inputId = `keyboard:${event.code}`;
+  if (!pointers.has(inputId)) return;
+  event.preventDefault();
+  endInput(inputId, true);
+}
+
+window.addEventListener('keydown', handlePianoKeyDown);
+window.addEventListener('keyup', handlePianoKeyUp);
 window.addEventListener('blur', () => {
   inputQueue.length = 0;
   clearInputVisualTimers();

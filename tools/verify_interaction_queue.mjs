@@ -28,6 +28,23 @@ function extractFunction(name) {
   throw new Error(`Unclosed function ${name} in main.js`);
 }
 
+function extractDeclaration(pattern, label) {
+  const match = mainSource.match(pattern);
+  if (!match) throw new Error(`Cannot find ${label} in main.js`);
+  return match[0];
+}
+
+const pianoKeyboardDeclarations = [
+  extractDeclaration(
+    /const PIANO_KEYBOARD_ROWS = Object\.freeze\(\[[\s\S]*?\n\]\);/,
+    'PIANO_KEYBOARD_ROWS',
+  ),
+  extractDeclaration(
+    /const PIANO_KEYBOARD_SAMPLES = Object\.freeze\([^\n]+\);/,
+    'PIANO_KEYBOARD_SAMPLES',
+  ),
+].join('\n');
+
 assert.equal(
   mainSource.includes('lastGlobalHit'),
   false,
@@ -42,6 +59,16 @@ assert.match(
   extractFunction('tryActivate'),
   /zonesAlongSegment\(/,
   'pointer movement must traverse every crossed zone',
+);
+assert.match(
+  extractFunction('handlePianoKeyDown'),
+  /beginZoneInput\(inputId, zi\)/,
+  'physical keyboard presses must reuse the pointer zone-input path',
+);
+assert.match(
+  extractFunction('handlePianoKeyUp'),
+  /endInput\(inputId, true\)/,
+  'physical keyboard releases must reuse the shared input-release path',
 );
 assert.doesNotMatch(
   extractFunction('retuneSustainVoice'),
@@ -96,6 +123,8 @@ vm.runInNewContext(
     return { id: ++swipeEntrySerial };
   }
   ${extractFunction('enterZone')}
+  ${extractFunction('createInputState')}
+  ${extractFunction('beginZoneInput')}
   ${extractFunction('tryActivate')}
 
   const S8 = 0.25;
@@ -147,6 +176,133 @@ vm.runInNewContext(
 
 const api = sandbox.interactionApi;
 const plain = value => Array.from(value);
+
+const keyboardSandbox = {};
+vm.runInNewContext(
+  `
+  let zones = [];
+  const performanceSettings = { pianoMode: true };
+  const pointers = new Map();
+  let settingsOpen = false;
+  let unlockConfirmOpen = false;
+  let started = true;
+  const buffers = { da: {} };
+  const calls = [];
+  ${pianoKeyboardDeclarations}
+  ${extractFunction('pianoKeyboardBinding')}
+  ${extractFunction('pianoZoneIndexForCode')}
+  function createInputState() { return {}; }
+  function hideControlsUntilIdle() {}
+  function start() { calls.push({ kind: 'start' }); }
+  function beginZoneInput(inputId, zi) {
+    pointers.set(inputId, {});
+    calls.push({ kind: 'begin', inputId, zi });
+  }
+  function endInput(inputId, musical) {
+    pointers.delete(inputId);
+    calls.push({ kind: 'end', inputId, musical });
+  }
+  ${extractFunction('handlePianoKeyDown')}
+  ${extractFunction('handlePianoKeyUp')}
+
+  globalThis.keyboardApi = {
+    rows: PIANO_KEYBOARD_ROWS,
+    samples: PIANO_KEYBOARD_SAMPLES,
+    binding: pianoKeyboardBinding,
+    zoneIndex: pianoZoneIndexForCode,
+    keyDown: handlePianoKeyDown,
+    keyUp: handlePianoKeyUp,
+    setZones(nextZones) { zones = nextZones; },
+    setPianoMode(enabled) { performanceSettings.pianoMode = enabled; },
+    calls,
+    pointers,
+  };
+  `,
+  keyboardSandbox,
+);
+
+const keyboardApi = keyboardSandbox.keyboardApi;
+const keyboardRows = [
+  ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI'],
+  ['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK'],
+  ['KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN', 'KeyM', 'Comma'],
+];
+const keyboardSamples = ['da', 'gou', 'jiao'];
+assert.deepEqual(
+  JSON.parse(JSON.stringify(keyboardApi.rows)),
+  keyboardRows,
+  'piano keyboard rows must be QWERTYUI, ASDFGHJK, and ZXCVBNM comma',
+);
+
+const landscapeKeyboardZones = keyboardSamples.flatMap(sample =>
+  Array.from({ length: 8 }, (_, pitchTier) => ({ sample, pitchTier }))
+);
+keyboardApi.setZones(landscapeKeyboardZones);
+for (let row = 0; row < keyboardRows.length; row++) {
+  for (let pitchTier = 0; pitchTier < keyboardRows[row].length; pitchTier++) {
+    assert.equal(
+      keyboardApi.zoneIndex(keyboardRows[row][pitchTier]),
+      row * 8 + pitchTier,
+      `landscape ${keyboardRows[row][pitchTier]} must select row ${row}, pitch ${pitchTier}`,
+    );
+  }
+}
+
+const portraitKeyboardZones = [];
+for (let pitchTier = 7; pitchTier >= 0; pitchTier--) {
+  for (const sample of keyboardSamples) portraitKeyboardZones.push({ sample, pitchTier });
+}
+keyboardApi.setZones(portraitKeyboardZones);
+for (let row = 0; row < keyboardRows.length; row++) {
+  for (let pitchTier = 0; pitchTier < keyboardRows[row].length; pitchTier++) {
+    assert.equal(
+      keyboardApi.zoneIndex(keyboardRows[row][pitchTier]),
+      (7 - pitchTier) * 3 + row,
+      `portrait ${keyboardRows[row][pitchTier]} must keep its sample and pitch`,
+    );
+  }
+}
+
+const keyboardEvent = (code, overrides = {}) => ({
+  code,
+  repeat: false,
+  ctrlKey: false,
+  altKey: false,
+  metaKey: false,
+  preventDefault() { this.defaultPrevented = true; },
+  ...overrides,
+});
+const qDown = keyboardEvent('KeyQ');
+const aDown = keyboardEvent('KeyA');
+keyboardApi.keyDown(qDown);
+keyboardApi.keyDown(aDown);
+assert.equal(qDown.defaultPrevented, true);
+assert.equal(aDown.defaultPrevented, true);
+assert.equal(keyboardApi.pointers.size, 2, 'different piano keys must support simultaneous holds');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(keyboardApi.calls)),
+  [
+    { kind: 'begin', inputId: 'keyboard:KeyQ', zi: 21 },
+    { kind: 'begin', inputId: 'keyboard:KeyA', zi: 22 },
+  ],
+  'keyboard keydown must enter the mapped zones through the shared path',
+);
+keyboardApi.keyDown(keyboardEvent('KeyW', { repeat: true }));
+keyboardApi.keyDown(keyboardEvent('KeyE', { ctrlKey: true }));
+assert.equal(keyboardApi.calls.length, 2, 'repeats and shortcut modifiers must not retrigger notes');
+
+keyboardApi.setPianoMode(false);
+assert.equal(keyboardApi.zoneIndex('KeyQ'), -1, 'keyboard mapping must be disabled outside piano mode');
+keyboardApi.keyUp(keyboardEvent('KeyQ'));
+keyboardApi.keyUp(keyboardEvent('KeyA'));
+assert.equal(keyboardApi.pointers.size, 0, 'keyup must release held notes after piano mode changes');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(keyboardApi.calls.slice(2))),
+  [
+    { kind: 'end', inputId: 'keyboard:KeyQ', musical: true },
+    { kind: 'end', inputId: 'keyboard:KeyA', musical: true },
+  ],
+);
 
 const sustainQueueSandbox = {};
 vm.runInNewContext(
@@ -390,3 +546,4 @@ console.log('- queued hits occupy consecutive eighth-note slots');
 console.log('- da, gou, and jiao each keep only their newest queued item');
 console.log('- held third-syllable voices retune in place and keep release-frame tracking');
 console.log('- free rhythm bypasses quantization and same-sample queue replacement');
+console.log('- piano keyboard rows reuse the shared input path in both orientations');
