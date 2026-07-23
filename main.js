@@ -37,8 +37,6 @@ let bgmMuted = false;
 let sfxMuted = false;
 const performanceSettings = { ...DEFAULT_PERFORMANCE_SETTINGS };
 let performanceSettingsSaving = false;
-let pendingPianoOctaveCloudValue = null;
-let pianoOctaveCloudWriteRunning = false;
 
 let startTime = 0;        // 第 0 步对应的 audio 时间
 let nextNoteTime = 0;     // 调度器下一个音符时间
@@ -167,8 +165,7 @@ const CREATOR_URL = `https://space.bilibili.com/${CREATOR_MID}`;
 const FEATURED_BVID = 'BV1kNKU6REBg';
 const FEATURED_VIDEO_URL = `https://www.bilibili.com/video/${FEATURED_BVID}/`;
 const NAVIGATION_MUTE_KEY = 'dagou-navigation-muted';
-const TOY_CLOUD_KEYS = Object.freeze({
-  sfxUnlocked: 'dagou_sfx_unlocked_v1',
+const LOCAL_STORAGE_KEYS = Object.freeze({
   settingsSeen: 'dagou_settings_seen_v1',
   dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
   hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
@@ -178,16 +175,7 @@ const TOY_CLOUD_KEYS = Object.freeze({
   rhythmSnap: 'dagou_rhythm_snap_v1',
   showGrid: 'dagou_show_grid_v1',
 });
-const TOY_CLOUD_KEY_LIST = Object.freeze(Object.values(TOY_CLOUD_KEYS));
-const TOY_REQUIRED_ABILITIES = Object.freeze([
-  'getUserProfile',
-  'getCloudStorage',
-  'setCloudStorage',
-  'navigate',
-]);
-const VIDEO_UNLOCK_ITEM_IDS = new Set(['dingdong', 'hajimi']);
-const LOCKED_SFX_IDS = new Set(['dingdong']);
-const DEBUG_UNLOCK_SFX = false; // 临时调试：发布前改回 false，恢复 Toy 云端锁定。
+const NEW_ITEM_IDS = new Set(['dingdong', 'hajimi']);
 let controlsIdleTimer = 0;
 let navigationMuted = false;
 
@@ -225,12 +213,6 @@ const updateDot = document.getElementById('update-dot');
 const settingsOverlay = document.getElementById('settings-overlay');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsClose = document.getElementById('settings-close');
-const unlockConfirmOverlay = document.getElementById('unlock-confirm-overlay');
-const unlockConfirmDialog = document.getElementById('unlock-confirm-dialog');
-const unlockConfirmTitle = document.getElementById('unlock-confirm-title');
-const unlockConfirmMessage = document.getElementById('unlock-confirm-message');
-const unlockConfirmCancel = document.getElementById('unlock-confirm-cancel');
-const unlockConfirmSubmit = document.getElementById('unlock-confirm-submit');
 const authorHomeButton = document.getElementById('author-home-button');
 const videoCard = document.getElementById('video-card');
 const videoPlay = videoCard.querySelector('.video-play');
@@ -430,77 +412,12 @@ function openCreatorSpace() {
   return navigateWithToy('space', CREATOR_MID, CREATOR_URL, '主页');
 }
 
-let videoUnlockPending = false;
-
-async function openFeaturedVideo(options) {
-  const optimisticUnlock = options?.optimisticUnlock === true;
-  const delayAfterCloudWriteMs = Number.isFinite(options?.delayAfterCloudWriteMs)
-    ? Math.max(0, options.delayAfterCloudWriteMs)
-    : 0;
-  if (videoUnlockPending) return;
-  videoUnlockPending = true;
+async function openFeaturedVideo() {
   videoCard.setAttribute('aria-busy', 'true');
-
   try {
-    const state = await toyStateReady;
-    if (!state.environmentAvailable || !state.toy) {
-      setNavigationMute(true);
-      window.location.assign(FEATURED_VIDEO_URL);
-      return;
-    }
-
-    const wasUnlocked = state.sfxUnlocked;
-    if (optimisticUnlock && !wasUnlocked) {
-      state.sfxUnlocked = true;
-      renderToyCloudState();
-    }
-    if (optimisticUnlock && !state.cloudReadable) {
-      showToyNotice(
-        '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-        true
-      );
-      return;
-    }
-
-    let unlockedNow = false;
-    if (state.cloudReadable && !wasUnlocked) {
-      try {
-        await state.toy.setCloudStorage({
-          [TOY_CLOUD_KEYS.sfxUnlocked]: '1',
-        });
-      } catch (error) {
-        markToyCloudUnavailable(state);
-        console.warn('[大狗Tap] 音效解锁状态写入失败。', error);
-        showToyNotice(
-          '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-          true
-        );
-        return;
-      }
-
-      state.sfxUnlocked = true;
-      unlockedNow = true;
-      renderToyCloudState();
-      if (delayAfterCloudWriteMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayAfterCloudWriteMs));
-      }
-    }
-
-    try {
-      setNavigationMute(true);
-      await state.toy.navigate({ type: 'video', id: FEATURED_BVID });
-    } catch (error) {
-      setNavigationMute(false);
-      console.warn('[大狗Tap] Toy 视频导航失败。', error);
-      showToyNotice(
-        unlockedNow
-          ? '已完成解锁，但视频打开失败，请稍后重试。多次失败建议更新APP。'
-          : '视频打开失败，请稍后重试。多次失败建议更新APP。',
-        true
-      );
-    }
+    setNavigationMute(true);
+    await navigateWithToy('video', FEATURED_BVID, FEATURED_VIDEO_URL, '视频');
   } finally {
-    videoUnlockPending = false;
     videoCard.removeAttribute('aria-busy');
   }
 }
@@ -527,33 +444,23 @@ for (const button of topControls.querySelectorAll('button')) {
 musicToggle.addEventListener('click', toggleMusic);
 sfxToggle.addEventListener('click', toggleSoundEffects);
 
-/* ---------- 设置菜单与 Toy 云状态 ---------- */
+/* ---------- 设置菜单与浏览器本地状态 ---------- */
 let settingsOpen = false;
-let unlockConfirmOpen = false;
-let unlockConfirmTrigger = null;
 let toyNoticeTimer = 0;
-const toyCloudState = {
-  toy: null,
+const localState = {
   initialized: false,
-  environmentAvailable: false,
-  cloudReadable: false,
-  sfxUnlocked: DEBUG_UNLOCK_SFX,
+  storageAvailable: true,
   settingsSeen: false,
   newSeen: {
     dingdong: false,
     hajimi: false,
   },
-  locallyChanged: {
-    settingsSeen: false,
-    dingdong: false,
-    hajimi: false,
-  },
 };
 const PERFORMANCE_SETTING_KEYS = Object.freeze({
-  pianoMode: TOY_CLOUD_KEYS.pianoMode,
-  octaveSwitching: TOY_CLOUD_KEYS.octaveSwitching,
-  rhythmSnap: TOY_CLOUD_KEYS.rhythmSnap,
-  showGrid: TOY_CLOUD_KEYS.showGrid,
+  pianoMode: LOCAL_STORAGE_KEYS.pianoMode,
+  octaveSwitching: LOCAL_STORAGE_KEYS.octaveSwitching,
+  rhythmSnap: LOCAL_STORAGE_KEYS.rhythmSnap,
+  showGrid: LOCAL_STORAGE_KEYS.showGrid,
 });
 
 function showToyNotice(message, isError = false) {
@@ -705,34 +612,34 @@ function resetPerformanceSettingsToDefaults() {
   replacePerformanceSettings(DEFAULT_PERFORMANCE_SETTINGS);
 }
 
-function markToyCloudUnavailable(state = toyCloudState) {
-  state.cloudReadable = false;
-  renderToyCloudState();
+function markLocalStorageUnavailable(state = localState) {
+  state.storageAvailable = false;
+  renderLocalState();
 }
 
-function readCloudPerformanceSettings(cloud) {
+function readLocalPerformanceSettings(storage) {
   const settings = { ...DEFAULT_PERFORMANCE_SETTINGS };
-  for (const [settingName, cloudKey] of Object.entries(PERFORMANCE_SETTING_KEYS)) {
-    const value = cloud[cloudKey];
+  for (const [settingName, storageKey] of Object.entries(PERFORMANCE_SETTING_KEYS)) {
+    const value = storage.getItem(storageKey);
     if (value === '1') settings[settingName] = true;
     else if (value === '0') settings[settingName] = false;
   }
-  const cloudOctaveStart = Number(cloud[TOY_CLOUD_KEYS.pianoOctaveStart]);
-  const validCloudOctaveStart = Number.isInteger(cloudOctaveStart) &&
-    cloudOctaveStart >= PIANO_OCTAVE_MIN &&
-    cloudOctaveStart <= PIANO_OCTAVE_MAX;
-  settings.pianoOctaveStart = validCloudOctaveStart
-    ? cloudOctaveStart
+  const localOctaveStart = Number(
+    storage.getItem(LOCAL_STORAGE_KEYS.pianoOctaveStart)
+  );
+  const validLocalOctaveStart = Number.isInteger(localOctaveStart) &&
+    localOctaveStart >= PIANO_OCTAVE_MIN &&
+    localOctaveStart <= PIANO_OCTAVE_MAX;
+  settings.pianoOctaveStart = validLocalOctaveStart
+    ? localOctaveStart
     : PIANO_DEFAULT_OCTAVE_START;
-  if (!validCloudOctaveStart) settings.octaveSwitching = false;
+  if (!validLocalOctaveStart) settings.octaveSwitching = false;
   return settings;
 }
 
 function renderPerformanceSettings() {
-  const cloudAvailable =
-    toyCloudState.initialized &&
-    toyCloudState.environmentAvailable &&
-    toyCloudState.cloudReadable;
+  const storageAvailable =
+    localState.initialized && localState.storageAvailable;
   octaveSwitchingSetting.hidden = !performanceSettings.pianoMode;
 
   for (const button of performanceSettingButtons) {
@@ -741,254 +648,116 @@ function renderPerformanceSettings() {
       'aria-checked',
       String(performanceSettings[settingName] === true)
     );
-    button.disabled = !toyCloudState.initialized || performanceSettingsSaving;
+    button.disabled = !localState.initialized || performanceSettingsSaving;
   }
 
   performanceSettingsStatus.classList.toggle(
     'is-error',
-    toyCloudState.initialized && !cloudAvailable
+    localState.initialized && !storageAvailable
   );
   if (performanceSettingsSaving) {
-    performanceSettingsStatus.textContent = '正在保存到哔哩哔哩云端…';
-  } else if (!toyCloudState.initialized) {
-    performanceSettingsStatus.textContent = '正在读取哔哩哔哩云端设置…';
-  } else if (cloudAvailable) {
-    performanceSettingsStatus.textContent = '设置已通过哔哩哔哩云端同步';
+    performanceSettingsStatus.textContent = '正在保存至此浏览器…';
+  } else if (!localState.initialized) {
+    performanceSettingsStatus.textContent = '正在从此浏览器读取设置…';
+  } else if (storageAvailable) {
+    performanceSettingsStatus.textContent = '设置已保存至此浏览器';
   } else {
-    performanceSettingsStatus.textContent = '云存储不可用，本次设置仅在当前页面有效';
+    performanceSettingsStatus.textContent = '浏览器存储不可用，本次设置仅在当前页面有效';
   }
   renderOctaveControls();
 }
 
-function renderToyCloudState() {
-  const showUpdateDot = !toyCloudState.settingsSeen;
+function renderLocalState() {
+  const showUpdateDot = !localState.settingsSeen;
   updateDot.classList.toggle('is-hidden', !showUpdateDot);
   topControls.classList.toggle('has-update-dot', showUpdateDot);
 
   for (const option of sfxOptions) {
     const sfxId = option.dataset.sfx;
-    const isCloudLockedOption = LOCKED_SFX_IDS.has(sfxId);
-    const locked = isCloudLockedOption && !toyCloudState.sfxUnlocked;
-    option.classList.toggle('is-locked', locked);
-
-    if (VIDEO_UNLOCK_ITEM_IDS.has(sfxId)) {
+    if (NEW_ITEM_IDS.has(sfxId)) {
       const label = sfxId === 'dingdong' ? '叮咚鸡' : '哈基米';
-      option.setAttribute('aria-label', locked ? `${label}，未解锁` : label);
-      option.classList.toggle('is-new-hidden', toyCloudState.newSeen[sfxId]);
+      option.setAttribute('aria-label', label);
+      option.classList.toggle('is-new-hidden', localState.newSeen[sfxId]);
     }
   }
   renderHajimiCharacterControl();
   renderPerformanceSettings();
 }
 
-async function detectToyEnvironment() {
-  const toy = window.toy;
-  if (
-    !toy ||
-    typeof toy.isSupport !== 'function' ||
-    TOY_REQUIRED_ABILITIES.some((ability) => typeof toy[ability] !== 'function')
-  ) {
-    return null;
-  }
-
+async function initializeLocalState() {
   try {
-    const support = await Promise.all(
-      TOY_REQUIRED_ABILITIES.map((ability) => toy.isSupport(ability))
-    );
-    if (support.some((available) => available !== true)) return null;
-
-    const profile = await toy.getUserProfile();
-    const nickname = typeof profile?.nickname === 'string'
-      ? profile.nickname.trim()
-      : '';
-    const avatar = typeof profile?.avatar === 'string'
-      ? profile.avatar.trim()
-      : '';
-    if (!nickname || !avatar) return null;
-
-    return toy;
+    replacePerformanceSettings(readLocalPerformanceSettings(window.localStorage));
+    localState.settingsSeen =
+      window.localStorage.getItem(LOCAL_STORAGE_KEYS.settingsSeen) === '1';
+    localState.newSeen.dingdong =
+      window.localStorage.getItem(LOCAL_STORAGE_KEYS.dingdongNewSeen) === '1';
+    localState.newSeen.hajimi =
+      window.localStorage.getItem(LOCAL_STORAGE_KEYS.hajimiNewSeen) === '1';
   } catch (error) {
-    console.warn('[大狗Tap] Toy 站内环境检测失败。', error);
-    return null;
+    localState.storageAvailable = false;
+    resetPerformanceSettingsToDefaults();
+    console.warn('[大狗Tap] 浏览器本地设置读取失败。', error);
   }
+
+  localState.initialized = true;
+  renderLocalState();
+  return localState;
 }
 
-async function initializeToyCloudState() {
-  const toy = await detectToyEnvironment();
-  if (!toy) {
-    toyCloudState.initialized = true;
-    resetPerformanceSettingsToDefaults();
-    renderToyCloudState();
-    return toyCloudState;
-  }
-
-  toyCloudState.toy = toy;
-  toyCloudState.environmentAvailable = true;
-
+function persistLocalState(items) {
+  if (!localState.storageAvailable) return false;
   try {
-    const cloud = await toy.getCloudStorage(TOY_CLOUD_KEY_LIST);
-    if (!cloud || typeof cloud !== 'object') {
-      throw new Error('Toy 云存储返回值无效');
+    for (const [key, value] of Object.entries(items)) {
+      window.localStorage.setItem(key, value);
     }
-    toyCloudState.cloudReadable = true;
-    toyCloudState.sfxUnlocked =
-      DEBUG_UNLOCK_SFX || cloud[TOY_CLOUD_KEYS.sfxUnlocked] === '1';
-    replacePerformanceSettings(readCloudPerformanceSettings(cloud));
-
-    if (!toyCloudState.locallyChanged.settingsSeen) {
-      toyCloudState.settingsSeen =
-        cloud[TOY_CLOUD_KEYS.settingsSeen] === '1';
-    }
-    if (!toyCloudState.locallyChanged.dingdong) {
-      toyCloudState.newSeen.dingdong =
-        cloud[TOY_CLOUD_KEYS.dingdongNewSeen] === '1';
-    }
-    if (!toyCloudState.locallyChanged.hajimi) {
-      toyCloudState.newSeen.hajimi =
-        cloud[TOY_CLOUD_KEYS.hajimiNewSeen] === '1';
-    }
+    return true;
   } catch (error) {
-    // 读取不可用时，三个演奏设置也必须整体保持默认值。
-    toyCloudState.cloudReadable = false;
-    resetPerformanceSettingsToDefaults();
-    console.warn('[大狗Tap] Toy 云状态读取失败。', error);
+    markLocalStorageUnavailable();
+    console.warn('[大狗Tap] 浏览器本地状态写入失败。', error);
+    showToyNotice('配置无法保存：浏览器存储不可用。', true);
+    return false;
   }
-
-  toyCloudState.initialized = true;
-  renderToyCloudState();
-  return toyCloudState;
-}
-
-function persistSeenState(items) {
-  void toyStateReady.then(async (state) => {
-    if (!state.environmentAvailable || !state.cloudReadable || !state.toy) return;
-
-    try {
-      await state.toy.setCloudStorage(items);
-    } catch (error) {
-      markToyCloudUnavailable(state);
-      console.warn('[大狗Tap] 提醒状态写入失败。', error);
-      showToyNotice(
-        '状态保存失败，请确认已登录哔哩哔哩后刷新重试。',
-        true
-      );
-    }
-  });
 }
 
 function markSettingsSeen() {
-  if (toyCloudState.settingsSeen) return;
-  toyCloudState.settingsSeen = true;
-  toyCloudState.locallyChanged.settingsSeen = true;
-  renderToyCloudState();
-  persistSeenState({ [TOY_CLOUD_KEYS.settingsSeen]: '1' });
+  if (localState.settingsSeen) return;
+  localState.settingsSeen = true;
+  renderLocalState();
+  persistLocalState({ [LOCAL_STORAGE_KEYS.settingsSeen]: '1' });
 }
 
 function markSfxNewSeen(sfxId) {
-  if (!VIDEO_UNLOCK_ITEM_IDS.has(sfxId) || toyCloudState.newSeen[sfxId]) return;
-  toyCloudState.newSeen[sfxId] = true;
-  toyCloudState.locallyChanged[sfxId] = true;
-  renderToyCloudState();
+  if (!NEW_ITEM_IDS.has(sfxId) || localState.newSeen[sfxId]) return;
+  localState.newSeen[sfxId] = true;
+  renderLocalState();
   const key = sfxId === 'dingdong'
-    ? TOY_CLOUD_KEYS.dingdongNewSeen
-    : TOY_CLOUD_KEYS.hajimiNewSeen;
-  persistSeenState({ [key]: '1' });
+    ? LOCAL_STORAGE_KEYS.dingdongNewSeen
+    : LOCAL_STORAGE_KEYS.hajimiNewSeen;
+  persistLocalState({ [key]: '1' });
 }
 
 function markAllSfxNewSeen() {
   const items = {};
-  for (const sfxId of VIDEO_UNLOCK_ITEM_IDS) {
-    if (toyCloudState.newSeen[sfxId]) continue;
-    toyCloudState.newSeen[sfxId] = true;
-    toyCloudState.locallyChanged[sfxId] = true;
+  for (const sfxId of NEW_ITEM_IDS) {
+    if (localState.newSeen[sfxId]) continue;
+    localState.newSeen[sfxId] = true;
     const key = sfxId === 'dingdong'
-      ? TOY_CLOUD_KEYS.dingdongNewSeen
-      : TOY_CLOUD_KEYS.hajimiNewSeen;
+      ? LOCAL_STORAGE_KEYS.dingdongNewSeen
+      : LOCAL_STORAGE_KEYS.hajimiNewSeen;
     items[key] = '1';
   }
 
   if (Object.keys(items).length === 0) return;
-  renderToyCloudState();
-  persistSeenState(items);
+  renderLocalState();
+  persistLocalState(items);
 }
 
-async function requireToyCloudContext() {
-  const state = await toyStateReady;
-  if (!state.environmentAvailable || !state.toy) {
-    showToyNotice('请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁', true);
-    return null;
-  }
-  if (!state.cloudReadable) {
-    showToyNotice(
-      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-      true
-    );
-    return null;
-  }
-  return state;
-}
-
-function openUnlockConfirm(unlockItem, trigger) {
-  if (unlockConfirmOpen || videoUnlockPending) return;
-  const itemLabel = unlockItem === 'emperor'
-    ? '哈基米（帝皇）'
-    : '叮咚鸡';
-  unlockConfirmOpen = true;
-  unlockConfirmTrigger = trigger ?? null;
-  unlockConfirmTitle.textContent = `解锁${itemLabel}`;
-  unlockConfirmMessage.textContent =
-    `${itemLabel}尚未解锁。观看开发视频即可同时解锁叮咚鸡和哈基米（帝皇），是否现在跳转？`;
-  settingsOverlay.inert = true;
-  unlockConfirmOverlay.inert = false;
-  unlockConfirmOverlay.classList.add('is-open');
-  unlockConfirmOverlay.setAttribute('aria-hidden', 'false');
-  unlockConfirmSubmit.focus({ preventScroll: true });
-}
-
-function closeUnlockConfirm(restoreFocus = true) {
-  if (!unlockConfirmOpen || videoUnlockPending) return;
-  const trigger = unlockConfirmTrigger;
-  unlockConfirmOpen = false;
-  unlockConfirmTrigger = null;
-  unlockConfirmOverlay.inert = true;
-  unlockConfirmOverlay.classList.remove('is-open');
-  unlockConfirmOverlay.setAttribute('aria-hidden', 'true');
-  if (settingsOpen) settingsOverlay.inert = false;
-  if (restoreFocus && settingsOpen) {
-    (trigger ?? settingsClose).focus({ preventScroll: true });
-  }
-}
-
-function setUnlockConfirmPending(pending) {
-  unlockConfirmCancel.disabled = pending;
-  unlockConfirmSubmit.disabled = pending;
-  unlockConfirmSubmit.textContent = pending ? '跳转中…' : '前往视频解锁';
-  if (pending) unlockConfirmSubmit.setAttribute('aria-busy', 'true');
-  else unlockConfirmSubmit.removeAttribute('aria-busy');
-}
-
-async function confirmUnlockFromVideo() {
-  if (!unlockConfirmOpen || videoUnlockPending) return;
-  setUnlockConfirmPending(true);
-  try {
-    await openFeaturedVideo({
-      optimisticUnlock: true,
-      delayAfterCloudWriteMs: 500,
-    });
-  } finally {
-    setUnlockConfirmPending(false);
-    closeUnlockConfirm();
-  }
-}
-
-/* 哈基米音效卡本身永不显示锁：皮肤切换收敛到独立的形象切换行，
-   帝皇的锁与 NEW 只挂在帝皇选项上，避免“哈基米被锁”的歧义。 */
+/* 哈基米皮肤切换收敛到独立的形象切换行。 */
 function renderHajimiCharacterControl() {
   const option = sfxOptions.find((item) => item.dataset.sfx === 'hajimi');
   if (!option) return;
 
   const isSelected = selectedSfxId === 'hajimi';
-  const emperorLocked = !toyCloudState.sfxUnlocked;
 
   hajimiSkinSwitcher.classList.toggle('is-open', isSelected);
   hajimiSkinSwitcher.setAttribute('aria-hidden', String(!isSelected));
@@ -1000,13 +769,9 @@ function renderHajimiCharacterControl() {
   hajimiSkinClassic.setAttribute('aria-checked', String(!hajimiAnimationEnabled));
   hajimiSkinEmperor.classList.toggle('is-active', hajimiAnimationEnabled);
   hajimiSkinEmperor.setAttribute('aria-checked', String(hajimiAnimationEnabled));
-  hajimiSkinEmperor.classList.toggle('is-locked', emperorLocked);
-  hajimiSkinEmperor.classList.toggle('is-new-hidden', toyCloudState.newSeen.hajimi);
-  hajimiSkinEmperorHint.textContent = emperorLocked ? '观看开发视频后解锁' : '已解锁';
-  hajimiSkinEmperor.setAttribute(
-    'aria-label',
-    emperorLocked ? '哈基米帝皇形象，观看开发视频后解锁' : '哈基米帝皇形象'
-  );
+  hajimiSkinEmperor.classList.toggle('is-new-hidden', localState.newSeen.hajimi);
+  hajimiSkinEmperorHint.textContent = '动态形象';
+  hajimiSkinEmperor.setAttribute('aria-label', '哈基米帝皇形象');
 
   hajimiOptionImage.src = isSelected && hajimiAnimationEnabled
     ? HAJIMI_ANIMATION_ICON_URL
@@ -1120,33 +885,14 @@ function selectSfxOption(option) {
   applyHajimiAnimationVisibility();
 }
 
-async function handleSfxOptionClick(option) {
+function handleSfxOptionClick(option) {
   const sfxId = option.dataset.sfx;
-  const requiresVideoUnlock = LOCKED_SFX_IDS.has(sfxId);
-  if (!requiresVideoUnlock) {
-    selectSfxOption(option);
-    return;
-  }
-
   markSfxNewSeen(sfxId);
-  if (toyCloudState.sfxUnlocked) {
-    selectSfxOption(option);
-    return;
-  }
-
-  const state = await requireToyCloudContext();
-  if (!state) return;
-  if (!state.sfxUnlocked) {
-    openUnlockConfirm('dingdong', option);
-    return;
-  }
-
   selectSfxOption(option);
 }
 
-/* 形象切换行只在选中哈基米时可见可点：原皮随意换回；
-   帝皇未解锁时点击只引导去看开发视频，绝不影响哈基米音效本身。 */
-async function handleSkinOptionClick(button) {
+/* 形象切换行只在选中哈基米时可见可点。 */
+function handleSkinOptionClick(button) {
   if (selectedSfxId !== 'hajimi') return;
   if (button.dataset.skin !== 'emperor') {
     setHajimiSkin(false);
@@ -1154,18 +900,6 @@ async function handleSkinOptionClick(button) {
   }
 
   markSfxNewSeen('hajimi');
-  if (toyCloudState.sfxUnlocked) {
-    setHajimiSkin(true);
-    return;
-  }
-
-  const state = await requireToyCloudContext();
-  if (!state) return;
-  if (!state.sfxUnlocked) {
-    openUnlockConfirm('emperor', button);
-    return;
-  }
-
   setHajimiSkin(true);
 }
 
@@ -1173,8 +907,8 @@ function resolveSfxSample(sample, sfxId = selectedSfxId) {
   return SFX_SAMPLE_SETS[sfxId]?.[sample] ?? sample;
 }
 
-renderToyCloudState();
-const toyStateReady = initializeToyCloudState();
+renderLocalState();
+const localStateReady = initializeLocalState();
 
 dogAnimationAtlas.addEventListener('load', () => {
   hajimiAnimationReady = true;
@@ -1196,43 +930,24 @@ dogAnimationAtlas.addEventListener('error', () => {
 async function handlePerformanceSettingClick(button) {
   if (performanceSettingsSaving) return;
   const settingName = button.dataset.setting;
-  const cloudKey = PERFORMANCE_SETTING_KEYS[settingName];
-  if (!cloudKey) return;
+  const storageKey = PERFORMANCE_SETTING_KEYS[settingName];
+  if (!storageKey) return;
 
-  const state = await toyStateReady;
+  await localStateReady;
   const nextValue = !performanceSettings[settingName];
-  if (!state.environmentAvailable || !state.cloudReadable || !state.toy) {
-    replacePerformanceSettings({
-      ...performanceSettings,
-      [settingName]: nextValue,
-    });
-    renderToyCloudState();
-    showToyNotice('云存储不可用，本次设置仅在当前页面有效。');
-    return;
-  }
-
   performanceSettingsSaving = true;
   renderPerformanceSettings();
+  replacePerformanceSettings({
+    ...performanceSettings,
+    [settingName]: nextValue,
+  });
   try {
-    await state.toy.setCloudStorage({
-      [cloudKey]: nextValue ? '1' : '0',
-    });
-    replacePerformanceSettings({
-      ...performanceSettings,
-      [settingName]: nextValue,
-    });
+    persistLocalState({ [storageKey]: nextValue ? '1' : '0' });
   } catch (error) {
-    // 写入失败后降级为本地会话设置，保留用户刚刚选择的值。
-    markToyCloudUnavailable(state);
-    replacePerformanceSettings({
-      ...performanceSettings,
-      [settingName]: nextValue,
-    });
-    console.warn('[大狗Tap] 演奏设置写入失败。', error);
-    showToyNotice('云存储不可用，本次设置仅在当前页面有效。');
+    console.warn('[大狗Tap] 浏览器设置写入失败。', error);
   } finally {
     performanceSettingsSaving = false;
-    renderToyCloudState();
+    renderLocalState();
   }
 }
 
@@ -1242,39 +957,11 @@ for (const button of performanceSettingButtons) {
   });
 }
 
-async function flushPianoOctaveCloudWrite() {
-  const state = await toyStateReady;
-  if (!state.environmentAvailable || !state.cloudReadable || !state.toy) {
-    pendingPianoOctaveCloudValue = null;
-    pianoOctaveCloudWriteRunning = false;
-    return;
-  }
-
-  while (pendingPianoOctaveCloudValue !== null) {
-    const octave = pendingPianoOctaveCloudValue;
-    pendingPianoOctaveCloudValue = null;
-    try {
-      await state.toy.setCloudStorage({
-        [TOY_CLOUD_KEYS.pianoOctaveStart]: String(octave),
-      });
-    } catch (error) {
-      pendingPianoOctaveCloudValue = null;
-      markToyCloudUnavailable(state);
-      console.warn('[大狗Tap] 八度档位写入失败。', error);
-      showToyNotice('云存储不可用，本次八度仅在当前页面有效。');
-      break;
-    }
-  }
-
-  pianoOctaveCloudWriteRunning = false;
-  renderToyCloudState();
-}
-
-function queuePianoOctaveCloudWrite(octave) {
-  pendingPianoOctaveCloudValue = normalizePianoOctaveStart(octave);
-  if (pianoOctaveCloudWriteRunning) return;
-  pianoOctaveCloudWriteRunning = true;
-  void flushPianoOctaveCloudWrite();
+function persistPianoOctave(octave) {
+  persistLocalState({
+    [LOCAL_STORAGE_KEYS.pianoOctaveStart]:
+      String(normalizePianoOctaveStart(octave)),
+  });
 }
 
 function shiftPianoOctave(direction) {
@@ -1291,8 +978,8 @@ function shiftPianoOctave(direction) {
   const previousSettings = { ...performanceSettings };
   performanceSettings.pianoOctaveStart = targetOctave;
   applyPerformanceSettings(previousSettings);
-  renderToyCloudState();
-  queuePianoOctaveCloudWrite(targetOctave);
+  renderLocalState();
+  persistPianoOctave(targetOctave);
   return true;
 }
 
@@ -1319,7 +1006,6 @@ function openSettings() {
 
 function closeSettings() {
   if (!settingsOpen) return;
-  if (unlockConfirmOpen) closeUnlockConfirm(false);
   markAllSfxNewSeen();
   settingsOpen = false;
   settingsOverlay.inert = true;
@@ -1340,24 +1026,12 @@ settingsOverlay.addEventListener('pointerdown', (event) => {
   if (event.target === settingsOverlay) closeSettings();
 });
 for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
-  settingsOverlay.addEventListener(eventName, (event) => event.stopPropagation());
+settingsOverlay.addEventListener(eventName, (event) => event.stopPropagation());
 }
 settingsPanel.addEventListener('click', (event) => event.stopPropagation());
-unlockConfirmCancel.addEventListener('click', () => closeUnlockConfirm());
-unlockConfirmSubmit.addEventListener('click', () => {
-  void confirmUnlockFromVideo();
-});
-unlockConfirmOverlay.addEventListener('pointerdown', (event) => {
-  if (event.target === unlockConfirmOverlay) closeUnlockConfirm();
-});
-for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
-  unlockConfirmOverlay.addEventListener(eventName, (event) => event.stopPropagation());
-}
-unlockConfirmDialog.addEventListener('click', (event) => event.stopPropagation());
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (unlockConfirmOpen) closeUnlockConfirm();
-  else closeSettings();
+  closeSettings();
 });
 
 authorHomeButton.addEventListener('click', handleAuthorHomeClick);
@@ -1366,7 +1040,7 @@ videoCard.addEventListener('click', openFeaturedVideo);
 /* 三套音效都保留 da / gou / jiao 的语义位置，只替换实际播放采样。 */
 for (const option of sfxOptions) {
   option.addEventListener('click', () => {
-    void handleSfxOptionClick(option);
+    handleSfxOptionClick(option);
   });
 }
 for (const button of hajimiSkinOptions) {
@@ -3378,8 +3052,7 @@ function handlePianoKeyDown(event) {
     event.ctrlKey ||
     event.altKey ||
     event.metaKey ||
-    settingsOpen ||
-    unlockConfirmOpen
+    settingsOpen
   ) return;
 
   if (event.code === 'ArrowLeft' || event.code === 'ArrowRight') {
